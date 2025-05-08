@@ -4,3 +4,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+common_models = { path = "../common_models" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+
+tokio = { version = "1", features = ["full"] }
+
+uuid = { version = "1", features = ["v4", "serde"] }
+
+log = "0.4"
+
+thiserror = "1.0"
+
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# 可根据需要添加开发依赖，例如用于单元测试的 mock 库等
+# tokio = { version = "1", features = ["macros", "rt-multi-thread"] } # 用于测试异步代码
+# common_models = { path = "../common_models" } # 如果测试需要直接引用
+
+# 为集成测试添加依赖 (P0.3.2_Test)
+env_logger = "0.11" # 用于在测试中初始化日志记录
+url = "2.5" # 用于解析 WebSocket URL，供客户端连接测试使用

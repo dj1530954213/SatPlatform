@@ -29,7 +29,7 @@ These rules define project structure, general conventions, or contextual informa
     -   Event handling logic clearly separated (following v2 structure).
 
 ### 2.3. Angular Frontend Code Organization
--   Follow the **Angular Style Guide** for organizing modules, components, and services: [https://angular.dev/style-guide](https://angular.dev/style-guide)
+-   Follow the **Angular Style Guide** for organizing modules, components, and services: [https://angular.dev/style-guide](mdc:https:/angular.dev/style-guide)
 -   Use **feature modules**.
 -   Place shared components, directives, and pipes in a `SharedModule`.
 -   Place core services (authentication, logging, notifications) in a `CoreModule`.

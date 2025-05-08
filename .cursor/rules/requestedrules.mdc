@@ -8,6 +8,7 @@ These rules typically involve more specific architectural decisions, the introdu
 
 ---
 
+
 ## 1. Technology Stack & Libraries - Conditional Selections
 
 ### 1.2. (Partial) Key Rust Crates - Specific Selections
