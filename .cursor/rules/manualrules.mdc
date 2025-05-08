@@ -1,0 +1,38 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+**Manual (Developer responsibilities; AI awareness helps)**
+These rules are primarily for human developers, covering environment setup, the actual running of tools, code review processes, or decisions requiring subjective judgment. The AI might be aware of these rules (if they are part of project documentation) but does not execute them directly.
+
+---
+
+## 0. Environment Setup (Developer Responsibility)
+
+### 0.1. Node.js Version
+-   Developers are responsible for installing and ensuring the use of Node.js version `22.14.0` in their local and CI/CD environments.
+
+---
+
+## 1. Technology Stack & Libraries - Decision Making (Developer Responsibility)
+
+### 1.2. (Partial) Key Rust Crates - Decision Making
+-   **Web Framework (if cloud backend is separate):**
+    -   Developers make the final decision between `actix-web` and `axum`.
+-   **Database:**
+    -   Developers make the final decision on whether to use a database, which specific type (e.g., PostgreSQL/SQLite), and the corresponding crate (e.g., `sqlx`).
+-   **Message Queue Client:**
+    -   Developers make the final decision on whether to use a message queue, which specific type (e.g., RabbitMQ), and the corresponding crate (e.g., `lapin`).
+
+---
+
+## 7. Coding Style - Tool Execution & Review (Developer Responsibility)
+
+### 7.1. Rust Coding Style (Tool Execution & Review)
+-   Developers are responsible for actually running `cargo fmt` locally to format code before committing.
+-   Developers are responsible for actually running `cargo clippy` (e.g., `cargo clippy --fix`) locally and reviewing/fixing all issues raised by `clippy` before committing.
+
+### 7.2. Angular/TypeScript Coding Style (Tool Execution & Review)
+
+-   Developers are responsible for actually running Prettier locally (or integrated into IDE/git hooks) to format code before committing.

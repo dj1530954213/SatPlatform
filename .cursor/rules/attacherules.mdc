@@ -1,0 +1,49 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+**Auto Attached (To be automatically considered by AI as context)**
+These rules define project structure, general conventions, or contextual information. The AI should automatically consider these as background knowledge when processing relevant files or tasks. Cursor might automatically include these rules in its context to better understand and adhere to project specifications, even if not explicitly stated in the prompt.
+
+---
+
+## 0. Environment & Tooling
+
+### 0.1. Node.js Version
+-   **Fixed at:** `22.14.0`
+-   *(AI needs this information as context when generating relevant configurations like `.nvmrc`, `package.json` `engines` field, or checking dependency compatibility.)*
+
+---
+
+## 2. Code Organization
+
+### 2.2. Rust Backend (Cloud Services / Tauri Rust) Code Organization
+-   **General:** Organize by feature or domain:
+    -   e.g., `handlers` (or `api`, `ws_handlers`), `services`, `repositories` (if using a database), `utils`.
+-   **Cloud Services (if separate):**
+    -   Follow idiomatic structures of the chosen web framework (e.g., `extractors`, `services`, `routes` for Actix-web).
+-   **Tauri Rust:**
+    -   Tauri commands in `commands.rs` or feature-specific command modules.
+    -   State management in `state.rs` or similar.
+    -   Event handling logic clearly separated (following v2 structure).
+
+### 2.3. Angular Frontend Code Organization
+-   Follow the **Angular Style Guide** for organizing modules, components, and services: [https://angular.dev/style-guide](https://angular.dev/style-guide)
+-   Use **feature modules**.
+-   Place shared components, directives, and pipes in a `SharedModule`.
+-   Place core services (authentication, logging, notifications) in a `CoreModule`.
+
+---
+
+## 7. General Conventions
+
+### 7.3. Logging Conventions
+-   **Rust:**
+    -   Use `log::info!`, `log::warn!`, `log::error!`, `log::debug!`, `log::trace!`.
+    -   Include contextual information in log messages.
+-   **Angular:**
+    -   Use `console.info`, `console.warn`, `console.error`, `console.debug`.
+    -   Consider using a lightweight logging service for more control.
+
+-   *(AI should follow this specification when asked to add logs or when adding logs in appropriate contexts, like error handling.)*

@@ -1,0 +1,173 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Project Rules: AI (Cursor) Directives
+
+**Always (To be strictly followed by AI)**
+These rules are the cornerstone of the project. The AI (Cursor) must unconditionally follow them when generating or modifying any related code. They define core technology choices, coding standards, and key patterns.
+
+---
+
+## 0. Core Versions & Syntax
+
+### 0.2. Angular Version & Syntax
+-   **Angular CLI and core library version:** `18.2.4`
+-   Must use Angular version 18 syntax and features.
+-   **Official documentation reference:** [https://angular.dev/overview](https://angular.dev/overview)
+
+### 0.3. Tauri Version & Syntax
+-   **`@tauri-apps/api`:** `^2.5.0`
+-   **`@tauri-apps/cli`:** `^2.0.0`
+-   Must use the latest Tauri v2 conventions.
+-   **Official documentation reference:** [https://v2.tauri.app/start/](https://v2.tauri.app/start/)
+
+---
+
+## 1. Technology Stack & Libraries
+
+### 1.1. Primary Languages
+-   **Backend Logic (Cloud Services, Tauri Rust Backend):** Rust (latest stable version).
+-   **Frontend (Control Center, On-site Terminal, Initial Cloud UI):** Angular (`18.2.4`) with TypeScript.
+-   **Application Framework (Desktop Application):** Tauri (use v2 for this project, specific versions in 0.3).
+
+### 1.2. Key Rust Crates (Prioritize and use consistently)
+*(When generating or modifying Rust code, AI must use these libraries)*
+-   **Asynchronous Runtime:** `tokio`
+-   **Serialization/Deserialization:** `serde` (use `serde_json` for JSON). All shared data models must derive `Serialize`, `Deserialize`, `Debug`, `Clone`.
+-   **Web Framework (if cloud backend is separate):** `actix-web` (or `axum` - preference to be confirmed by developers; if confirmed, AI follows that choice).
+-   **HTTP Client:** `reqwest`
+-   **Logging:** `log` crate facade and an appropriate backend (e.g., `env_logger`, `tracing-subscriber`).
+-   **Error Handling:** `thiserror` for library-style errors, `anyhow` for application-level errors (or consistently use `thiserror`-style custom error enums).
+-   **WebSocket:** `tokio-tungstenite` (as used in the `rust_websocket_utils` library).
+-   **UUID Generation:** `uuid` (with `v4` feature and `serde` support enabled).
+-   **Date/Time:** `chrono` (with `serde` feature enabled).
+
+### 1.3. Key Angular Libraries/Features (Prioritize and use consistently)
+*(When generating or modifying Angular code, AI must use these libraries/features)*
+-   **Reactive Programming:** RxJS (extensive use of pipeable operators).
+-   **HTTP Client:** `@angular/common/http` (`HttpClient`).
+-   **Forms:** Reactive Forms (`FormGroup`, `FormControl`, `FormArray`).
+-   **Routing:** `@angular/router`.
+-   **UI Components:** NG-ZORRO (`ng-zorro-antd`) (preferred, ensure consistent styling).
+-   **Charts and Visualization:** ECharts (for charts and complex icon displays).
+-   **State Management (Frontend):** Local/service-level state primarily using RxJS `BehaviorSubject` / `Subject`. (For complex global state solutions, see "Agent Requested").
+-   **Change Detection:** Prefer `ChangeDetectionStrategy.OnPush` in appropriate components.
+
+### 1.4. Tauri API Usage
+-   Use `@tauri-apps/api` (v2 version) for frontend-to-Rust communication (`invoke`, `event.listen`, `event.emit`).
+-   For file system, dialogs, notifications, etc., use the corresponding modules from `@tauri-apps/api` (v2 version).
+-   Follow v2 documentation: [https://v2.tauri.app/](https://v2.tauri.app/)
+
+---
+
+## 2. Project Structure & Shared Components
+
+### 2.1. Shared Models
+-   All shared Rust data structures (payloads, DTOs) must reside in the `common_models` crate.
+-   These models must derive `Serialize`, `Deserialize`, `Debug`, `Clone`.
+
+### 2.4. WebSocket Utility Library
+-   The `rust_websocket_utils` crate is the sole provider of WebSocket server and client transport layer functionality.
+-   Do not reimplement basic WebSocket connection/message handling outside this library.
+
+---
+
+## 3. Data Model & Interface Conventions
+
+### 3.1. Rust Struct (`common_models`) Conventions
+-   All optional fields use `Option<T>`.
+-   Use `String` for text, `i64` for timestamps (Unix epoch milliseconds or seconds, keep consistent and document).
+-   For flexible/dynamic JSON substructures in models, use `serde_json::Value`.
+-   Use specific enums (defined in `common_models`) for states, types, etc. (e.g., `TaskStatus`, `DeviceType`, `FeedbackStatus`).
+-   All public structs and enums must have `rustdoc` comments explaining their purpose and fields.
+
+### 3.2. TypeScript Interface/Class (Angular) Conventions
+-   These must directly correspond to Rust structs in `common_models`.
+-   If possible, generate these interfaces/classes from Rust structs (e.g., using tools or requesting Cursor to generate based on Rust definitions).
+-   Optional fields use the `?` suffix (e.g., `fieldName?: string`).
+-   Use `string`, `number`, `boolean`, or specific TypeScript `enum`s/`union` types that match Rust counterparts.
+-   All public interfaces/classes and properties must have JSDoc/TSDoc comments.
+
+---
+
+## 4. API Design & Communication Protocols
+
+### 4.1. WebSocket Message Structure & Handling
+-   All WebSocket communication must use the `WsMessage` struct defined in `common_models` (or `rust_websocket_utils`).
+-   `WsMessage.message_type` (string) determines the payload type. Be consistent with defined `message_type` constants/enums.
+-   `WsMessage.payload` is a JSON string, serialized from a `*Payload` struct in `common_models`.
+-   Implement robust parsing and error handling for incoming payloads.
+
+### 4.2. REST API (Cloud Services) Design Principles
+-   Use standard HTTP methods (`GET`, `POST`, `PUT`, `DELETE`) appropriately.
+-   Request and response bodies should be JSON.
+-   Wrap responses in a standard `ApiResponse<T>` structure (see `common_models`).
+-   Use clear, noun-based resource paths (e.g., `/api/v1/tasks`, `/api/v1/projects/{projectId}`).
+-   Version the API (e.g., `/api/v1/...`) when introducing breaking changes.
+
+### 4.3. Tauri Command (Frontend <-> Rust) Design
+-   Tauri commands in Rust should return `Result<T, String>`, where `T` is the payload on success, and `String` is a user-friendly error message for the frontend (following Tauri v2 error handling patterns).
+-   Frontend `invoke` calls must handle `Promise` rejections.
+
+---
+
+## 5. Error Handling
+
+### 5.1. Rust Backend Error Handling
+-   All fallible operations must use `Result<T, E>`.
+-   Use `thiserror` to define custom error types for specific modules/services to provide context.
+-   Comprehensively log errors using the `log` crate (e.g., `error!`, `warn!`). Include contextual information like `task_id`, `user_id` whenever possible.
+-   For API handlers, map internal errors to appropriate HTTP status codes and `ApiResponse` error messages.
+
+### 5.2. Angular Frontend Error Handling
+-   Use the `catchError` operator in RxJS pipes to handle `HttpClient` errors.
+-   Handle Tauri `invoke` Promise rejections.
+-   Display user-friendly error messages (e.g., using NG-ZORRO's `NzMessageService` or `NzNotificationService`, or a dedicated error component). Avoid exposing raw technical error details to the user.
+-   Log technical error details to the console (`console.error`).
+
+---
+
+## 6. Asynchronous Programming
+
+### 6.1. Rust Asynchronous Programming
+-   Use `tokio`'s `async/await` for all I/O-intensive operations.
+-   Be mindful of `.await` points and potential blocking in asynchronous contexts.
+-   Use `tokio::spawn` for concurrent background tasks.
+-   Use `Arc<Mutex<T>>` or `Arc<RwLock<T>>` for shared mutable state in asynchronous contexts.
+
+### 6.2. Angular Asynchronous Programming
+-   Use Observables (RxJS) for asynchronous operations like HTTP requests, WebSocket events, and complex event sequences.
+-   Use `async/await` with Promises (e.g., from Tauri `invoke`) where appropriate.
+-   Ensure proper unsubscription from Observables to prevent memory leaks (e.g., `takeUntil` operator with a `Subject`, unsubscribing in `ngOnDestroy`, or using the `async` pipe).
+
+---
+
+## 7. Coding Style (AI Output portion)
+
+### 7.1. Rust Coding Style
+-   **Naming:** Use `snake_case` for variables, function/method names, and module names. Use `PascalCase` for structs, enums, traits, and type aliases.
+-   **Comments:** Use `rustdoc` (`///` for public items, `//!` for module-level) for all public APIs. Use `//` for implementation details.
+-   AI-generated code should adhere as closely as possible to `rustfmt` formatting standards and `clippy` recommendations.
+
+### 7.2. Angular/TypeScript Coding Style
+-   Follow the official Angular Style Guide: [https://angular.dev/style-guide](https://angular.dev/style-guide) and Angular 18 best practices.
+-   Follow TypeScript best practices (e.g., strong typing, avoid `any` as much as possible).
+-   **Naming:** Use `camelCase` for variables and functions. Use `PascalCase` for classes, interfaces, and enums.
+-   **Comments:** Use JSDoc/TSDoc for all public methods, properties, classes, and interfaces.
+-   AI-generated code should adhere as closely as possible to Prettier formatting standards.
+
+---
+
+## 8. State Management
+
+### 8.1. Rust (Tauri Backend State Management)
+-   Use the `tauri::State<T>` wrapper for managed state accessible in commands (following Tauri v2 state management patterns).
+-   For shared mutable state, prefer `Arc<Mutex<T>>` or `Arc<RwLock<T>>` wrapped in `tauri::State`.
+
+### 8.2. Angular Frontend State Management
+-   Use component properties for component-local state.
+-   For cross-component state sharing/caching within a feature or at the service level, use RxJS `BehaviorSubject` or `ReplaySubject` exposed as Observables from services.
+
+-   Avoid direct DOM manipulation to change state; rely on Angular's data binding.

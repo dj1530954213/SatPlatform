@@ -1,0 +1,34 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+**Agent Requested (To be followed by AI upon specific user request)**
+These rules typically involve more specific architectural decisions, the introduction of optional tools, or how specific tasks should be performed. The AI should only follow them when the user (agent) explicitly requests a task related to these rules. The AI will not typically apply these rules proactively.
+
+---
+
+## 1. Technology Stack & Libraries - Conditional Selections
+
+### 1.2. (Partial) Key Rust Crates - Specific Selections
+*(To be used when the developer instructs AI, for example:)*
+-   **Database (Cloud Backend):**
+    -   *Instruction Example:* "Implement database interaction for feature X using `sqlx` with PostgreSQL."
+-   **Message Queue Client (Cloud Backend):**
+    -   *Instruction Example:* "Integrate a message queue for feature Y using `lapin` to operate RabbitMQ."
+
+### 1.3. (Partial) Key Angular Libraries/Features - Specific Selections
+*(To be used when the developer instructs AI, for example:)*
+-   **State Management (Frontend - For complex global state):**
+    -   *Instruction Example:* "We've decided to use NgRx (or Akita) for the project; please generate the basic module/state structure."
+
+---
+
+## 4. API Design & Communication Protocols - Conditional Patterns
+
+### 4.4. Message Queue (Cloud Services) Communication Patterns
+*(To be applied when the developer instructs AI, for example: "Design and implement a system for asynchronous task notification for Z using a message queue.")*
+-   Used for asynchronous task notifications (e.g., new task assigned).
+-   Messages should be lightweight, typically containing IDs or minimal data; clients fetch full details via API if needed.
+
+-   Define clear topics/queues for different event types.
