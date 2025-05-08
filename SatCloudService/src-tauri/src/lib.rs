@@ -1,3 +1,13 @@
+//! `SatCloudService` 服务端核心逻辑。
+
+pub mod api;
+pub mod config;
+pub mod db;
+pub mod error;
+pub mod mq;
+pub mod state;
+pub mod ws_server;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()

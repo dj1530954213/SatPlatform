@@ -164,6 +164,168 @@ cd SatPlatform
 # cd sat_on_site_mobile && cargo tauri dev (或 cargo tauri android run / cargo tauri ios run)
 ```
 
-## 7. 贡献指南 (Placeholder)
+## 7. 项目目录
+common_models/
+├── src/
+│   ├── lib.rs                      # 声明模块 (pub mod task_info 等)
+│   ├── task_info.rs                # TaskInfo, TaskStatus, TaskAssignment (任务信息、状态、分配等)
+│   ├── project_details.rs          # ProjectDetails, DeviceInfo, PointInfo, DebugStepInfo (项目详情、设备、点位、调试步骤等)
+│   ├── test_data.rs                # SingleTestFeedback, LinkTestResult (测试反馈、结果等)
+│   ├── ws_payloads.rs              # WebSocket 消息体中的具体业务载荷结构 (如 EnvironmentReadyNotification, SingleTestCommand, RegisterPayload 等)
+│   ├── api_models.rs               # API 请求/响应体中可能共用的数据结构
+│   └── error.rs                    # (可选) 通用错误类型/代码
+└── Cargo.toml                      # 依赖: serde, uuid, chrono 等
+
+sat_cloud_service_desktop/
+├── src/                            # Angular 前端 (管理界面)
+│   ├── app/                        # 管理界面的组件、服务、模块
+│   ├── assets/
+│   ├── environments/
+│   ├── index.html
+│   ├── main.ts
+│   └── styles.css
+├── src-tauri/                      # Rust 后端 (Tauri)
+│   ├── src/
+│   │   ├── main.rs                 # Tauri 入口点, 服务初始化与启动
+│   │   ├── config.rs               # 配置加载 (端口, DB 连接字符串, MQ 地址等)
+│   │   ├── state.rs                # 共享应用状态 (数据库连接池, MQ 连接, ConnectionManager 等)
+│   │   ├── error.rs                # 服务端错误类型定义
+│   │   ├── api/                    # RESTful API 模块
+│   │   │   ├── mod.rs
+│   │   │   ├── routes.rs           # API 路由定义 (使用 Actix/Axum 等)
+│   │   │   ├── task_handler.rs     # 处理任务相关 API
+│   │   │   ├── project_handler.rs  # 处理项目相关 API
+│   │   │   └── test_data_handler.rs # 处理测试数据上传/查询 API
+│   │   ├── ws_server/              # WebSocket 服务端模块
+│   │   │   ├── mod.rs
+│   │   │   ├── service.rs          # WS 服务设置与运行
+│   │   │   ├── connection_manager.rs # 管理 ClientSession, Group 逻辑
+│   │   │   ├── message_router.rs   # 处理和分发入站 WebSocket 消息
+│   │   │   ├── heartbeat_monitor.rs # 处理心跳检测和超时
+│   │   │   └── data_synchronizer.rs # 处理组内数据同步逻辑
+│   │   ├── db/                     # 数据库交互模块
+│   │   │   ├── mod.rs
+│   │   │   ├── connection.rs       # 数据库连接池设置
+│   │   │   ├── task_repo.rs        # 任务数据的仓储操作
+│   │   │   └── ...                 # 其他数据的仓储操作
+│   │   ├── mq/                     # 消息队列交互模块
+│   │   │   ├── mod.rs
+│   │   │   ├── connection.rs       # MQ 连接管理
+│   │   │   ├── publisher.rs        # 消息发布逻辑
+│   │   │   └── subscriber.rs       # 消息订阅和处理逻辑 (例如: 收到新任务通知后转发给 WS)
+│   │   └── commands.rs             # (可选) 如果管理 UI 需要通过 Tauri 命令与后端交互
+│   ├── build.rs                    # (可选) 构建脚本
+│   └── tauri.conf.json             # Tauri 配置
+├── node_modules/                   # Node.js 依赖
+├── .gitignore
+├── Cargo.toml                      # Rust 依赖 (tauri, common_models, rust_websocket_utils, web 框架, DB 驱动, MQ 客户端等)
+└── package.json                    # 前端依赖
+
+
+sat_control_center_desktop/
+├── src/                            # Angular 前端
+│   ├── app/
+│   │   ├── core/                   # 核心服务、守卫、拦截器
+│   │   │   ├── services/
+│   │   │   │   ├── auth.service.ts
+│   │   │   │   ├── task-state.service.ts  # 任务状态管理 (使用 RxJS)
+│   │   │   │   ├── websocket.service.ts # 封装 Tauri WS 事件监听和命令调用
+│   │   │   │   └── api.service.ts       # 封装 Tauri API 命令调用
+│   │   │   └── guards/
+│   │   ├── features/               # 按功能划分的模块/组件
+│   │   │   ├── task-list/
+│   │   │   ├── task-detail/
+│   │   │   ├── single-testing/      # 单体测试界面
+│   │   │   ├── link-testing/        # 链路测试界面
+│   │   │   └── history-viewer/      # 测试历史查看界面
+│   │   ├── shared/                 # 共享 UI 组件、指令、管道
+│   │   ├── app.component.ts
+│   │   ├── app.module.ts
+│   │   └── app-routing.module.ts
+│   ├── assets/
+│   ├── environments/
+│   ├── index.html
+│   ├── main.ts
+│   └── styles.css
+├── src-tauri/                      # Rust 后端 (Tauri)
+│   ├── src/
+│   │   ├── main.rs                 # Tauri 入口点, 命令注册
+│   │   ├── commands/               # Tauri 命令模块 (按功能组织) ✨
+│   │   │   ├── mod.rs
+│   │   │   ├── general_cmds.rs     # 通用命令 (如连接, 发送 WS 消息)
+│   │   │   ├── task_cmds.rs        # 任务相关命令 (获取列表/详情)
+│   │   │   ├── test_cmds.rs        # 测试相关命令 (发起测试/确认步骤)
+│   │   │   └── data_cmds.rs        # 数据相关命令 (获取项目详情/上传数据)
+│   │   ├── ws_client/              # WebSocket 客户端模块 ✨
+│   │   │   ├── mod.rs
+│   │   │   └── service.rs          # 管理 WS 连接, 收发消息, 发射 Tauri 事件
+│   │   ├── api_client/             # API 客户端模块 ✨
+│   │   │   ├── mod.rs
+│   │   │   └── service.rs          # 封装调用云端 API 的函数 (使用 reqwest)
+│   │   ├── plc_comms/              # PLC 通信模块 (根据架构图占位)
+│   │   │   └── mod.rs
+│   │   ├── state.rs                # Rust 后端状态管理 (WS 连接状态, API Client 实例等)
+│   │   ├── config.rs               # 配置加载 (云端 URL 等)
+│   │   ├── event.rs                # Tauri 事件定义与处理 (与 Angular 交互) ✨
+│   │   └── error.rs                # 客户端侧错误类型定义
+│   ├── build.rs
+│   └── tauri.conf.json             # Tauri 配置
+├── node_modules/
+├── .gitignore
+├── Cargo.toml                      # Rust 依赖 (tauri, common_models, rust_websocket_utils, reqwest 等)
+└── package.json
+
+
+sat_on_site_mobile/
+├── src/                            # Angular 前端 (移动端优化)
+│   ├── app/
+│   │   ├── core/                   # 核心服务 (类似中心侧)
+│   │   │   ├── services/
+│   │   │   └── ...
+│   │   ├── features/               # 功能模块 (移动端特定视图)
+│   │   │   ├── task-list/
+│   │   │   ├── task-detail/
+│   │   │   ├── site-preparation/    # 现场准备界面 ✨
+│   │   │   ├── onsite-single-test/  # 现场单体测试执行界面 ✨
+│   │   │   ├── onsite-link-test/    # 现场链路测试执行界面 ✨
+│   │   │   └── ...
+│   │   ├── shared/                 # 共享 UI 组件等
+│   │   ├── app.component.ts
+│   │   ├── app.module.ts
+│   │   └── app-routing.module.ts
+│   ├── assets/
+│   ├── environments/
+│   ├── index.html
+│   ├── main.ts
+│   └── styles.scss                 # 使用 SCSS 可能更有利于移动端样式管理
+├── src-tauri/                      # Rust 后端 (Tauri)
+│   ├── src/
+│   │   ├── main.rs                 # Tauri 入口点
+│   │   ├── commands/               # Tauri 命令模块 (部分命令实现可能不同) ✨
+│   │   │   ├── mod.rs
+│   │   │   ├── general_cmds.rs
+│   │   │   ├── task_cmds.rs
+│   │   │   ├── test_cmds.rs        # 例如: confirm_environment_ready_on_site, execute_simulated_single_test
+│   │   │   └── data_cmds.rs
+│   │   ├── ws_client/              # WebSocket 客户端模块 (类似中心侧) ✨
+│   │   │   ├── mod.rs
+│   │   │   └── service.rs
+│   │   ├── api_client/             # API 客户端模块 (类似中心侧) ✨
+│   │   │   ├── mod.rs
+│   │   │   └── service.rs
+│   │   ├── device_comms/           # 设备通信模块 ✨
+│   │   │   └── mod.rs
+│   │   ├── mobile_specific/        # 用于调用 Tauri 移动端原生 API 的模块 (阶段 13) ✨
+│   │   │   └── mod.rs
+│   │   ├── state.rs                # Rust 后端状态管理
+│   │   ├── config.rs               # 配置加载
+│   │   ├── event.rs                # Tauri 事件处理 ✨
+│   │   └── error.rs                # 客户端侧错误类型
+│   ├── build.rs
+│   └── tauri.conf.json             # Tauri 配置 (包含 mobile 配置节) ✨
+├── node_modules/
+├── .gitignore
+├── Cargo.toml                      # Rust 依赖 (类似中心侧, 可能增加 tauri 移动端 API 插件依赖)
+└── package.json
 
 *(如果项目接受贡献，可以在此添加相关说明)*
