@@ -1,0 +1,96 @@
+<mxfile host="Electron" modified="2023-10-27T12:00:00.000Z" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/22.0.3 Chrome/114.0.5735.289 Electron/25.8.4 Safari/537.36" etag="unique_etag_rwu" version="22.0.3" type="device">
+  <diagram name="rust_websocket_utils" id="diagram_rwu_id">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- rust_websocket_utils Main Box -->
+        <mxCell id="rwu_main" value="rust_websocket_utils&lt;br&gt;&lt;i&gt;共享库 (Library Crate)&lt;/i&gt;&lt;br&gt;提供WebSocket客户端和服务端传输层逻辑" style="swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize=40;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;rounded=1;shadow=0;strokeWidth=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="220" width="320" height="280" as="geometry">
+            <mxRectangle x="400" y="220" width="140" height="40" as="alternateBounds" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Internal Modules -->
+        <mxCell id="rwu_message" value="message.rs&lt;br&gt;&lt;i&gt;定义 WsMessage&amp;lt;T&amp;gt; (T 通常来自 common_models)&lt;/i&gt;&lt;br&gt;作用：标准化WebSocket消息结构" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;rounded=1;" vertex="1" parent="rwu_main">
+          <mxGeometry y="40" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="rwu_error" value="error.rs&lt;br&gt;&lt;i&gt;定义库的自定义错误 (使用 thiserror)&lt;/i&gt;&lt;br&gt;作用：提供具体的WebSocket操作错误处理" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;rounded=1;" vertex="1" parent="rwu_main">
+          <mxGeometry y="90" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="rwu_server_transport" value="server/transport.rs&lt;br&gt;&lt;i&gt;ServerTransportLayer&lt;/i&gt;&lt;br&gt;作用：封装服务端监听、接受连接、&lt;br&gt;及每个连接的收发消息逻辑" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;rounded=1;" vertex="1" parent="rwu_main">
+          <mxGeometry y="140" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="rwu_client_transport" value="client/transport.rs&lt;br&gt;&lt;i&gt;ClientTransportLayer&lt;/i&gt;&lt;br&gt;作用：封装客户端连接服务端、&lt;br&gt;及与服务端收发消息逻辑" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;rounded=1;" vertex="1" parent="rwu_main">
+          <mxGeometry y="210" width="300" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Dependencies -->
+        <mxCell id="common_models_dep" value="common_models&lt;br&gt;&lt;i&gt;提供 WsMessage&amp;lt;T&amp;gt; 的载荷类型 (如 EchoPayload)&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="80" y="80" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="tokio_tungstenite_dep" value="tokio-tungstenite&lt;br&gt;&lt;i&gt;底层的异步WebSocket实现&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="80" y="420" width="200" height="60" as="geometry" />
+        </mxCell>
+         <mxCell id="serde_dep" value="serde / serde_json&lt;br&gt;&lt;i&gt;用于WsMessage及其载荷的JSON序列化/反序列化&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="80" y="200" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="tokio_dep" value="tokio / futures-util&lt;br&gt;&lt;i&gt;提供异步运行时和流处理&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="80" y="310" width="200" height="70" as="geometry" />
+        </mxCell>
+
+
+        <!-- Consumers -->
+        <mxCell id="cloud_service" value="SatCloudService&lt;br&gt;&lt;i&gt;(其 ws_server 模块)&lt;/i&gt;&lt;br&gt;作用：作为WebSocket服务端，管理客户端连接和消息路由" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="780" y="150" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="control_center" value="SatControlCenter&lt;br&gt;&lt;i&gt;(其 ws_client 模块)&lt;/i&gt;&lt;br&gt;作用：作为WebSocket客户端，连接云服务并进行数据交互" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="780" y="320" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="on_site_mobile" value="SatOnSiteMobile&lt;br&gt;&lt;i&gt;(其 ws_client 模块)&lt;/i&gt;&lt;br&gt;作用：同上，作为移动端WebSocket客户端" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="780" y="450" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Edges (Relationships) -->
+        <mxCell id="edge_rwu_common_models" value="依赖" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=open;endFill=0;entryX=1;entryY=0.5;exitX=0;exitY=0.25;strokeWidth=1;" edge="1" parent="1" source="rwu_main" target="common_models_dep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+         <mxCell id="edge_rwu_serde" value="依赖" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=open;endFill=0;entryX=1;entryY=0.5;exitX=0;exitY=0.5;strokeWidth=1;" edge="1" parent="1" source="rwu_main" target="serde_dep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_rwu_tokio" value="依赖" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=open;endFill=0;entryX=1;entryY=0.5;exitX=0;exitY=0.75;strokeWidth=1;" edge="1" parent="1" source="rwu_main" target="tokio_dep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_rwu_tokio_tungstenite" value="依赖" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=open;endFill=0;entryX=1;entryY=0.5;exitX=0;exitY=0.9;strokeWidth=1;" edge="1" parent="1" source="rwu_main" target="tokio_tungstenite_dep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge_cloud_uses_server" value="使用 ServerTransportLayer" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;strokeWidth=1;" edge="1" parent="1" source="rwu_server_transport" target="cloud_service">
+          <mxGeometry relative="1" as="geometry">
+             <Array as="points">
+                <mxPoint x="740" y="375"/>
+                <mxPoint x="740" y="195"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_control_uses_client" value="使用 ClientTransportLayer" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;strokeWidth=1;" edge="1" parent="1" source="rwu_client_transport" target="control_center">
+          <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="740" y="445"/>
+                <mxPoint x="740" y="365"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_mobile_uses_client" value="使用 ClientTransportLayer" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=1;exitY=0.7;entryX=0;entryY=0.5;strokeWidth=1;" edge="1" parent="1" source="rwu_client_transport" target="on_site_mobile">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+                <mxPoint x="740" y="469"/>
+                <mxPoint x="740" y="495"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

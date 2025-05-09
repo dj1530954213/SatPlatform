@@ -1,8 +1,12 @@
-//! `rust_websocket_utils` crate 提供了 WebSocket 通信的通用工具和抽象。
+//! `rust_websocket_utils` 是一个提供 WebSocket 通信实用功能的 Rust Crate。
+//! 它旨在简化 WebSocket 客户端和服务器的实现，特别关注与 `common_models`
+//! 一起使用时的消息处理和序列化/反序列化。
 //! 
-//! 它封装了底层的 WebSocket 库 (如 `tokio-tungstenite`)，
-//! 提供了简化的客户端和服务器端传输层，以及消息处理的常用功能。
-//! 目的是在 SatPlatform 的各个 WebSocket 组件中重用这些核心通信逻辑。
+//! 主要模块包括：
+//! - `message`: 定义核心消息结构，如 `WsMessage`。
+//! - `error`: 定义库中使用的错误类型，如 `WsServerError` 和 `WsClientError`。
+//! - `server`: 提供 WebSocket 服务器端传输层和相关功能。
+//! - `client`: 提供 WebSocket 客户端传输层和相关功能。
 
 pub mod client;
 pub mod error;

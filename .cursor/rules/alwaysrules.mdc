@@ -8,6 +8,12 @@ alwaysApply: true
 **Always (To be strictly followed by AI)**
 These rules are the cornerstone of the project. The AI (Cursor) must unconditionally follow them when generating or modifying any related code. They define core technology choices, coding standards, and key patterns.
 
+
+### AI Operational Guidelines
+-   **Pre-task Contextual Understanding:** Before starting each task, briefly understand the relationship between subsequent tasks and the current task to ensure that the generated code can meet subsequent requirements.
+-   **Immediate Compilation and Debugging:** Directly compile and resolve potential errors after the current task is developed.
+-   **Language of Interaction:** All thoughts, comments, and answers are in Chinese.
+
 ---
 
 ## 0. Core Versions & Syntax
@@ -15,13 +21,13 @@ These rules are the cornerstone of the project. The AI (Cursor) must uncondition
 ### 0.2. Angular Version & Syntax
 -   **Angular CLI and core library version:** `18.2.4`
 -   Must use Angular version 18 syntax and features.
--   **Official documentation reference:** [https://angular.dev/overview](https://angular.dev/overview)
+-   **Official documentation reference:** [https://angular.dev/overview](mdc:https:/angular.dev/overview)
 
 ### 0.3. Tauri Version & Syntax
 -   **`@tauri-apps/api`:** `^2.5.0`
 -   **`@tauri-apps/cli`:** `^2.0.0`
 -   Must use the latest Tauri v2 conventions.
--   **Official documentation reference:** [https://v2.tauri.app/start/](https://v2.tauri.app/start/)
+-   **Official documentation reference:** [https://v2.tauri.app/start/](mdc:https:/v2.tauri.app/start)
 
 ---
 
@@ -58,7 +64,7 @@ These rules are the cornerstone of the project. The AI (Cursor) must uncondition
 ### 1.4. Tauri API Usage
 -   Use `@tauri-apps/api` (v2 version) for frontend-to-Rust communication (`invoke`, `event.listen`, `event.emit`).
 -   For file system, dialogs, notifications, etc., use the corresponding modules from `@tauri-apps/api` (v2 version).
--   Follow v2 documentation: [https://v2.tauri.app/](https://v2.tauri.app/)
+-   Follow v2 documentation: [https://v2.tauri.app/](mdc:https:/v2.tauri.app)
 
 ---
 
@@ -152,7 +158,7 @@ These rules are the cornerstone of the project. The AI (Cursor) must uncondition
 -   AI-generated code should adhere as closely as possible to `rustfmt` formatting standards and `clippy` recommendations.
 
 ### 7.2. Angular/TypeScript Coding Style
--   Follow the official Angular Style Guide: [https://angular.dev/style-guide](https://angular.dev/style-guide) and Angular 18 best practices.
+-   Follow the official Angular Style Guide: [https://angular.dev/style-guide](mdc:https:/angular.dev/style-guide) and Angular 18 best practices.
 -   Follow TypeScript best practices (e.g., strong typing, avoid `any` as much as possible).
 -   **Naming:** Use `camelCase` for variables and functions. Use `PascalCase` for classes, interfaces, and enums.
 -   **Comments:** Use JSDoc/TSDoc for all public methods, properties, classes, and interfaces.

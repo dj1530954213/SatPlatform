@@ -23,6 +23,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 
 chrono = { version = "0.4", features = ["serde"] }
 
+url = "2.5" # 用于解析 WebSocket URL，供客户端连接测试使用
+
 [dev-dependencies]
 # 可根据需要添加开发依赖，例如用于单元测试的 mock 库等
 # tokio = { version = "1", features = ["macros", "rt-multi-thread"] } # 用于测试异步代码
@@ -30,4 +32,3 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # 为集成测试添加依赖 (P0.3.2_Test)
 env_logger = "0.11" # 用于在测试中初始化日志记录
-url = "2.5" # 用于解析 WebSocket URL，供客户端连接测试使用
