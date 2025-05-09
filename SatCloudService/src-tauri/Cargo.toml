@@ -10,16 +10,31 @@ rust-version = "1.77.2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[lib]
-name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# [[bin]] # 通常不需要显式定义，如果 main.rs 存在，它会自动成为名为 'app' 的二进制文件
+# name = "app"
+# path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "2.2.0", features = [] }
+tauri-build = { version = "2.0.0-rc.5", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-log = "0.4"
-tauri = { version = "2.5.0", features = [] }
-tauri-plugin-log = "2.0.0-rc"
+log = "0.4.21"
+tauri = { version = "2.0.0-beta.21", features = [] }
+tauri-plugin-log = { version = "2.0.0-rc" }
+common_models = { path = "../../common_models" }
+rust_websocket_utils = { path = "../../rust_websocket_utils" }
+tokio = { version = "1.37.0", features = ["full"] }
+env_logger = "0.11"
+uuid = { version = "1.8.0", features = ["v4", "serde"] }
+thiserror = "1.0.61"
+anyhow = "1.0.86"
+chrono = { version = "0.4.38", features = ["serde"] }
+futures-util = "0.3.30"
+tokio-tungstenite = "0.23.1"
+dashmap = "5.5.3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

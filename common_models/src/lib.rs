@@ -7,6 +7,7 @@
 pub mod project_details;
 pub mod task_info;
 pub mod ws_payloads;
+pub mod enums;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
