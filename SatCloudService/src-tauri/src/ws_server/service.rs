@@ -2,73 +2,30 @@
 
 //! WebSocket 服务端核心服务，如启动监听等。
 
-// 暂时为空，后续会根据 P1.1.1 添加 start_ws_server 函数等。 
+// 暂无特定内容，P1.1.1 中已添加 start_ws_server 函数。
 
 use crate::config::WsConfig;
-use anyhow::Context;
+// 旧: use crate::ws_server::client_session::ClientSession; // 确保 ClientSession 已导入 -- 警告：未使用
+use crate::ws_server::connection_manager::ConnectionManager;
+use crate::ws_server::message_router; // 导入 message_router 模块
+use anyhow::{Context, Result}; // 确保 Context 被导入
+use futures_util::stream::SplitStream;
+use log::{debug, error, info, warn};
+use rust_websocket_utils::{
+    message::WsMessage as ActualWsMessage,
+    server::transport::{
+        start_server,
+        ConnectionHandler as WsConnectionHandler,
+        receive_message,
+    },
+    error::WsError,
+};
 use std::sync::Arc;
 use tauri::AppHandle;
-use crate::ws_server::connection_manager::ConnectionManager;
-use rust_websocket_utils::message::WsMessage as ActualWsMessage; // 修改这里
-
-// 以下是 `rust_websocket_utils` 和 `common_models` 中实际类型的占位符。
-// 这些类型会根据项目规范在相应的 crate 中定义。
-// 例如: WsMessage 对应 common_models::ws::WsMessage
-// 例如: ClientId 对应 uuid::Uuid
-
-// 这是一个简化的占位符模块，用于模拟 `rust_websocket_utils` 可能提供的服务端功能。
-// 实际的 API 将取决于 P0.3.x 阶段中 `rust_websocket_utils` 的具体实现。
-mod hypothetical_ws_utils {
-    use anyhow::Result;
-    use std::net::SocketAddr;
-    use tokio::sync::mpsc;
-    use uuid::Uuid;
-    use super::ActualWsMessage; // 使用外部定义的 ActualWsMessage
-
-    // hypothetical_ws_utils::WsMessage 这个定义可以移除，或者保留但不在回调签名中使用
-    // #[derive(Debug)]
-    // pub struct WsMessage { pub content: String } 
-
-    pub struct ServerTransportLayer;
-
-    impl ServerTransportLayer {
-        pub async fn serve(
-            config: crate::config::WsConfig,
-            mut on_connect: impl FnMut(Uuid, SocketAddr, mpsc::Sender<ActualWsMessage>) + Send + Sync + 'static,
-            _on_message: impl FnMut(Uuid, ActualWsMessage) + Send + Sync + 'static, 
-            _on_disconnect: impl FnMut(Uuid) + Send + Sync + 'static, 
-        ) -> Result<()> {
-            let addr = format!("{}:{}", config.host, config.port);
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
-            log::info!("[ws_server] WebSocket 服务正在监听: {}", addr);
-
-            loop {
-                match listener.accept().await {
-                    Ok((stream, client_addr)) => {
-                        let client_id = Uuid::new_v4();
-                        log::info!("[ws_server] 新客户端尝试连接: ID: {}, 地址: {}", client_id, client_addr);
-                        
-                        match tokio_tungstenite::accept_async(stream).await {
-                            Ok(_ws_stream) => { 
-                                log::info!("[ws_server] 客户端 WebSocket 握手成功: ID: {}, 地址: {}", client_id, client_addr);
-                                // 创建的 channel 必须是 mpsc::channel::<ActualWsMessage>
-                                let (tx, _rx) = mpsc::channel::<ActualWsMessage>(32);
-                                on_connect(client_id, client_addr, tx.clone());
-                                tokio::spawn(async move {});
-                            }
-                            Err(e) => {
-                                log::error!("[ws_server] 客户端 {} 的 WebSocket 握手错误: {}", client_addr, e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("[ws_server] 接受传入连接失败: {}", e);
-                    }
-                }
-            }
-        }
-    }
-}
+use tokio::sync::mpsc;
+// 旧: use tokio_tungstenite::tungstenite::protocol::Message as TungsteniteMessage; // -- 警告：未使用
+use tokio_tungstenite::WebSocketStream;
+use tokio::net::TcpStream;
 
 /// 启动 WebSocket 服务端。
 ///
@@ -79,46 +36,175 @@ mod hypothetical_ws_utils {
 /// * `Result<(), anyhow::Error>`: 如果服务成功启动并运行（或按预期设计为有限运行后退出），则返回 `Ok(())`。
 ///   如果启动过程中发生错误，则返回包含详细错误信息的 `Err`。
 pub async fn start_ws_server(app_handle: AppHandle) -> Result<(), anyhow::Error> {
-    log::info!("[ws_server] 正在初始化 WebSocket 服务...");
+    info!("[WebSocket服务] 正在初始化WebSocket服务...");
 
     let ws_config = Arc::new(WsConfig::load(&app_handle));
-    log::info!(
-        "[ws_server] 配置已加载: host={}, port={}",
-        ws_config.host,
-        ws_config.port
+    info!(
+        "[WebSocket服务] 配置已加载: host={}, port={}",
+        ws_config.host, ws_config.port
     );
 
     // 创建 ConnectionManager
     let connection_manager = Arc::new(ConnectionManager::new());
 
-    // 定义 on_connect 回调
-    let conn_manager_clone_on_connect = Arc::clone(&connection_manager);
-    let on_connect_cb = move |_client_id_from_util: uuid::Uuid, addr: std::net::SocketAddr, sender: tokio::sync::mpsc::Sender<ActualWsMessage>| {
-        let manager = Arc::clone(&conn_manager_clone_on_connect);
-        tokio::spawn(async move {
-            let _client_session = manager.add_client(addr, sender).await;
-        });
-    };
+    // 定义 on_new_connection 回调
+    // 此回调会在每个新的 WebSocket 连接成功建立后被调用。
+    let on_new_connection_cb = {
+        let conn_manager_for_cb = Arc::clone(&connection_manager);
+        
+        // Clone AppHandle for potential future use inside the callback if needed (e.g. for state or events)
+        // let _app_handle_for_cb = app_handle.clone(); 
 
-    let on_message_cb = move |client_id: uuid::Uuid, message: ActualWsMessage| {
-        log::info!("[ws_server] [占位回调] 来自客户端 {} 的消息 - 内容: {:?}", client_id, message);
-    };
+        move |mut ws_conn_handler: WsConnectionHandler, mut ws_receiver: SplitStream<WebSocketStream<TcpStream>>| {
+            // 对每个连接，都克隆一次 Arc<ConnectionManager>
+            let connection_manager_clone = Arc::clone(&conn_manager_for_cb);
+            
+            // 为每个连接创建一个独立的 Tokio 任务来处理其生命周期
+            async move {
+                // 1. 为此连接创建一个 mpsc channel，用于将待发送的 WsMessage 从 ClientSession 传递到实际的发送逻辑
+                //    ClientSession 将持有 tx，此任务将持有 rx 并使用 ws_conn_handler.send_message 发送。
+                let (tx_to_client_session, mut rx_from_client_session) = mpsc::channel::<ActualWsMessage>(32); // 32 是通道缓冲区大小
 
-    let on_disconnect_cb = move |client_id: uuid::Uuid| {
-        log::info!("[ws_server] [占位回调] 客户端已断开 - ID: {}", client_id);
-        // 后续操作: P1.2.2 调用 ConnectionManager.remove_client(client_id)
-    };
+                // 2. 使用 ConnectionManager 创建 ClientSession
+                //    注意：add_client 需要 SocketAddr，但 WsConnectionHandler 和 SplitStream 目前不直接提供。
+                //    这是一个需要解决的差异。 rust_websocket_utils::server::transport::start_server
+                //    在接受连接时有 client_addr，但它没有直接传递给 on_new_connection 回调。
+                //    需要修改 rust_websocket_utils::server::transport::start_server 让它传递 client_addr。
+                //    【临时占位】：使用一个虚拟的 SocketAddr。这需要在 P0.3 或此处进一步修订。
+                let temp_placeholder_addr: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+                // TODO: 确保 rust_websocket_utils::server::transport::start_server 将 SocketAddr 传递给 on_new_connection 回调
+                //       并在此处使用真实的 client_addr。
 
-    if let Err(e) = hypothetical_ws_utils::ServerTransportLayer::serve(
-        (*ws_config).clone(),
-        on_connect_cb,
-        on_message_cb,
-        on_disconnect_cb,
-    ).await {
-        log::error!("[ws_server] WebSocket 服务启动失败或遇到致命错误: {}", e);
-        return Err(e).context("WebSocket 服务运行失败");
+                let client_session = connection_manager_clone.add_client(temp_placeholder_addr, tx_to_client_session).await;
+                info!(
+                    "[WebSocket服务] 新客户端已连接并注册: SessionID={}, Addr={:?}", // Addr 之后会是真实的
+                    client_session.client_id,
+                    client_session.addr // 将显示占位符地址
+                );
+
+                // 3. 启动一个任务，专门负责从 rx_from_client_session 读取消息并使用 ws_conn_handler 发送
+                let client_session_id_for_sender_task = client_session.client_id;
+                let mut sender_task_ws_conn_handler = ws_conn_handler; // ws_conn_handler 需要被此任务拥有
+
+                tokio::spawn(async move {
+                    while let Some(ws_msg_to_send) = rx_from_client_session.recv().await {
+                        debug!(
+                            "[SenderTask {}] 从通道收到消息，准备通过 WebSocket 发送: Type={}",
+                            client_session_id_for_sender_task, ws_msg_to_send.message_type
+                        );
+                        if let Err(e) = sender_task_ws_conn_handler.send_message(&ws_msg_to_send).await {
+                            error!(
+                                "[SenderTask {}] 发送消息到客户端失败: {}",
+                                client_session_id_for_sender_task, e
+                            );
+                            // 如果发送失败（例如连接已断开），可以考虑关闭 mpsc channel 的接收端
+                            // 以便任何尝试发送到此 ClientSession 的地方能感知到。
+                            // 但通常，如果 WebSocket 连接断开，下面的接收循环会先结束。
+                        }
+                    }
+                    debug!("[SenderTask {}] MPSC 通道已关闭，发送任务结束。", client_session_id_for_sender_task);
+                });
+                
+                // 4. 主循环：接收来自客户端的消息，并交由 MessageRouter 处理
+                let client_session_clone_for_router = Arc::clone(&client_session);
+                loop {
+                    match receive_message(&mut ws_receiver).await {
+                        Some(Ok(ws_msg)) => {
+                            // 将接收到的消息和 ClientSession 交给 MessageRouter 处理
+                            if let Err(e) = message_router::handle_message(
+                                Arc::clone(&client_session_clone_for_router),
+                                ws_msg,
+                            )
+                            .await
+                            {
+                                error!(
+                                    "[WebSocket服务] SessionID {}: 处理消息时发生错误: {}",
+                                    client_session_clone_for_router.client_id, e
+                                );
+                                // 根据错误类型决定是否需要断开连接或采取其他措施
+                                // 例如，某些错误可能是致命的，需要关闭此客户端连接
+                            }
+                        }
+                        Some(Err(ws_err)) => {
+                            // 处理从 receive_message 返回的错误
+                            match ws_err {
+                                WsError::DeserializationError(e) => {
+                                    warn!(
+                                        "[WebSocket服务] SessionID {}: 接收消息反序列化失败: {}。可能需要通知客户端。",
+                                        client_session_clone_for_router.client_id, e
+                                    );
+                                    // 可以选择向客户端发送一个格式错误的响应，但这较难，因为原始消息可能无法解析
+                                    // 通常，handle_message 内部的 ErrorResponse 机制更适合处理可解析但无效的 payload
+                                }
+                                WsError::WebSocketProtocolError(e) => {
+                                    warn!(
+                                        "[WebSocket服务] SessionID {}: WebSocket 协议错误: {}。连接可能已损坏。",
+                                        client_session_clone_for_router.client_id, e
+                                    );
+                                    break; // 协议错误通常意味着连接不再可用
+                                }
+                                WsError::Message(s) => { // 一般消息错误
+                                    warn!(
+                                        "[WebSocket服务] SessionID {}: 内部消息处理错误: {}. 连接可能已损坏。",
+                                        client_session_clone_for_router.client_id, s
+                                    );
+                                     break;
+                                }
+                                _ => { // 其他 WsError 类型 (IoError, SerializationError (发送时), etc.)
+                                    error!(
+                                        "[WebSocket服务] SessionID {}: 从 receive_message 收到未明确处理的 WsError: {:?}。断开连接。",
+                                        client_session_clone_for_router.client_id, ws_err
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        None => {
+                            // receive_message 返回 None 表示连接已正常关闭或流结束
+                            info!(
+                                "[WebSocket服务] SessionID {}: 客户端连接已关闭 (由 receive_message 返回 None)。",
+                                client_session_clone_for_router.client_id
+                            );
+                            break; // 退出接收循环
+                        }
+                    }
+                }
+
+                // 5. 连接结束后，清理工作
+                info!(
+                    "[WebSocket服务] SessionID {}: 连接处理任务结束。正在从 ConnectionManager 移除会话...",
+                    client_session.client_id
+                );
+                if let Some(removed_session) = connection_manager_clone.remove_client(&client_session.client_id).await {
+                    info!(
+                        "[WebSocket服务] 会话 {} (Addr: {:?}, Role: {:?}) 已成功移除。",
+                        removed_session.client_id,
+                        removed_session.addr, // 仍为占位符
+                        *removed_session.role.read().await
+                    );
+                } else {
+                    warn!(
+                        "[WebSocket服务] 尝试移除会话 {} 时未在 ConnectionManager 中找到。",
+                        client_session.client_id
+                    );
+                }
+                // 发送任务的 rx_from_client_session 会因为其对应的 tx (在 ClientSession 中) 被 drop 而结束。
+                // 或者可以显式地 drop/close client_session.sender 中的 tx，但这需要 ClientSession 内部做更改。
+                // 这里依赖 ClientSession 被 drop 时，其内部的 mpsc::Sender 被 drop。
+            }
+        }
+    };
+    
+    // 构建监听地址
+    let listen_addr = format!("{}:{}", ws_config.host, ws_config.port);
+
+    // 启动实际的 WebSocket 服务
+    if let Err(e) = start_server(listen_addr, on_new_connection_cb).await {
+        error!("[WebSocket服务] WebSocket服务启动失败或遇到致命错误: {}", e);
+        // 旧: return Err::<(), _>(e.into()).context("WebSocket服务运行失败");
+        return Err(anyhow::Error::from(e)).context("WebSocket服务运行失败");
     }
     
-    log::warn!("[ws_server] WebSocket 服务意外停止。");
+    warn!("[WebSocket服务] WebSocket服务意外停止。start_server 函数已返回。");
     Ok(())
 } 

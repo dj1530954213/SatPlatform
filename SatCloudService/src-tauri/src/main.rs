@@ -27,7 +27,9 @@ fn main() {
             // 确保此操作仅被调用一次。
             // Using `try_init` is safer if there's any chance of multiple initializations.
             // 如果有可能发生多次初始化，使用 `try_init` 会更安全。
-            if let Err(e) = env_logger::builder().filter_level(log::LevelFilter::Info).try_init() {
+            if let Err(e) = env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("debug,app=debug") // 默认 debug, app 也是 debug
+            ).try_init() {
                 // eprintln! is used here because the logger might not be initialized yet.
                 // 此处使用 eprintln! 是因为日志记录器此时可能尚未初始化。
                 eprintln!("初始化 env_logger 失败: {}", e);
