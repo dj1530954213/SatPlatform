@@ -56,6 +56,98 @@ mod tests {
 // 而不是 use common_models::project_details::ProjectDetails;
 // pub use project_details::*; // 移除未使用的导入
 // pub use task_info::*;       // 移除未使用的导入
-pub use ws_payloads::*;
-pub use enums::*;
+// pub use ws_payloads::*; 
 pub use task_models::*; // 新增：导出 task_models 中的所有公共项 (P3.3.1)
+
+// 重新导出关键的结构体和枚举，使其更易于访问
+// 例如 `use common_models::ClientRole;` 而不是 `use common_models::enums::ClientRole;`
+pub use enums::ClientRole;
+pub use task_models::{TaskDebugState, PreCheckItemStatus, SingleTestStepStatus};
+
+use serde::{Deserialize, Serialize};
+// Uuid 用于生成 ID，但通常我们将其作为 String 类型存储在结构体中，以简化序列化和跨语言互操作性。
+// 如果确实需要在结构体中存储 Uuid 类型，则需要确保 serde 支持已启用，并正确处理。
+// use uuid::Uuid;
+
+/// 通用的 WebSocket 消息结构。
+/// 所有通过 WebSocket 传输的消息都应遵循此格式。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WsMessage {
+    /// 消息的唯一标识符，通常是一个 UUID v4 字符串。
+    pub message_id: String,
+    /// 消息发送时的时间戳 (Unix epoch milliseconds)。
+    pub timestamp: i64,
+    /// 消息类型，用于指示 payload 的具体结构和含义。
+    /// 例如："Register", "TaskStateUpdate", "UpdatePreCheckItem"。
+    pub message_type: String,
+    /// 消息的实际内容，通常是一个序列化后的 JSON 字符串，
+    /// 其具体结构由 `message_type` 决定。
+    pub payload: String,
+}
+
+#[cfg(test)]
+mod lib_tests { // 重命名测试模块以避免与子模块中的 `tests` 冲突，或者确保只有一个 `tests` 模块在此文件
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+    // 确保 ws_payloads 模块在此作用域内可用，如果 WsMessage 的测试依赖它
+    // 如果 ws_payloads 本身有自己的 tests 模块，这里的引用可能需要调整
+    // 但 RegisterPayload 等类型应该通过 `use super::*` 或 `use crate::ws_payloads::*` 可用
+
+    #[test]
+    fn test_ws_message_serialization_deserialization() {
+        let example_payload_struct = crate::ws_payloads::RegisterPayload { // 使用 crate:: 明确路径
+            group_id: "test_group".to_string(),
+            role: ClientRole::ControlCenter, // ClientRole 应通过 pub use enums::ClientRole; 可用
+            task_id: "test_task".to_string(),
+        };
+        let payload_str = serde_json::to_string(&example_payload_struct).unwrap();
+
+        let original_ws_message = WsMessage {
+            message_id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now().timestamp_millis(),
+            message_type: crate::ws_payloads::REGISTER_MESSAGE_TYPE.to_string(), // 使用 crate:: 明确路径
+            payload: payload_str,
+        };
+
+        let serialized = serde_json::to_string_pretty(&original_ws_message).unwrap();
+        // println!("Serialized WsMessage:\n{}", serialized); // 用于调试
+        let deserialized: WsMessage = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(original_ws_message.message_id, deserialized.message_id);
+        assert_eq!(original_ws_message.timestamp, deserialized.timestamp);
+        assert_eq!(original_ws_message.message_type, deserialized.message_type);
+        assert_eq!(original_ws_message.payload, deserialized.payload);
+
+        let deserialized_payload: crate::ws_payloads::RegisterPayload = // 使用 crate:: 明确路径
+            serde_json::from_str(&deserialized.payload).unwrap();
+        assert_eq!(example_payload_struct.group_id, deserialized_payload.group_id);
+        assert_eq!(example_payload_struct.role, deserialized_payload.role);
+    }
+}
+
+// 从 ws_payloads 中显式导出常量和 Payload 结构体
+pub use crate::ws_payloads::{ 
+    EchoPayload,
+    ErrorResponsePayload,
+    PingPayload,
+    PongPayload,
+    RegisterPayload,
+    RegisterResponsePayload,
+    PartnerStatusPayload,
+    ECHO_MESSAGE_TYPE,
+    ERROR_RESPONSE_MESSAGE_TYPE,
+    PING_MESSAGE_TYPE,
+    PONG_MESSAGE_TYPE,
+    REGISTER_MESSAGE_TYPE,
+    REGISTER_RESPONSE_MESSAGE_TYPE,
+    PARTNER_STATUS_UPDATE_MESSAGE_TYPE,
+    UPDATE_PRE_CHECK_ITEM_TYPE,
+    START_SINGLE_TEST_STEP_TYPE,
+    FEEDBACK_SINGLE_TEST_STEP_TYPE,
+    CONFIRM_SINGLE_TEST_STEP_TYPE,
+    TASK_STATE_UPDATE_MESSAGE_TYPE,
+};
+
+// 从 task_models 模块显式导出业务相关的 Payload (如果它们确实在那里定义)
+pub use crate::task_models::{UpdatePreCheckItemPayload, StartSingleTestStepPayload}; // 根据 Linter 修正路径
