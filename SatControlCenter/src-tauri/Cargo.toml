@@ -1,9 +1,9 @@
 [package]
-name = "app"
+name = "sat_control_center"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
+description = "Satellite Control Center Application"
+authors = ["Your Name"]
+license = "MIT"
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
@@ -15,11 +15,30 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.2.0", features = [] }
+tauri-build = { version = "2.0.0-beta.19", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.5.0", features = [] }
+tauri = { version = "2.0.0-beta.20", features = [] }
 tauri-plugin-log = "2.0.0-rc"
+# 修正项目内部依赖的路径
+common_models = { path = "../../common_models" }
+rust_websocket_utils = { path = "../../rust_websocket_utils" }
+# 添加异步运行时
+tokio = { version = "1", features = ["full"] }
+# 添加错误处理
+thiserror = "1.0"
+env_logger = "0.11"
+anyhow = "1.0"
+url = "2.5.0"
+uuid = { version = "1", features = ["v4", "serde"] }
+futures-util = "0.3.30"
+tokio-tungstenite = { version = "0.23.0", features = ["native-tls"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+# This feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]

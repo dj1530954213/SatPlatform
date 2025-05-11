@@ -1,5 +1,5 @@
 [package]
-name = "app"
+name = "sat-cloud-service"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
@@ -15,26 +15,31 @@ rust-version = "1.77.2"
 # path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "2.0.0-rc.5", features = [] }
+tauri-build = { version = "2.0.0-beta", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-log = "0.4.21"
-tauri = { version = "2.0.0-beta.21", features = [] }
+log = "0.4"
+tauri = { version = "2.0.0-beta", features = ["tray-icon", "native-tls-vendored"] }
 tauri-plugin-log = { version = "2.0.0-rc" }
 common_models = { path = "../../common_models" }
 rust_websocket_utils = { path = "../../rust_websocket_utils" }
-tokio = { version = "1.37.0", features = ["full"] }
-env_logger = "0.11"
-uuid = { version = "1.8.0", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.10"
+uuid = { version = "1.6.1", features = ["v4", "serde"] }
 thiserror = "1.0.61"
 anyhow = "1.0.86"
-chrono = { version = "0.4.38", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3.30"
 tokio-tungstenite = "0.23.1"
 dashmap = "5.5.3"
 
+# WebSocket 和网络相关
+axum = { version = "0.7.4", features = ["ws", "macros"] }
+tower-http = { version = "0.5.0", features = ["fs", "trace", "cors"] }
+tower = { version = "0.4" }
+
 [features]
-default = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
+# default = ["custom-protocol"]
+# custom-protocol = ["tauri/custom-protocol"]

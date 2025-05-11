@@ -7,18 +7,67 @@ use std::net::SocketAddr;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use log::{info, debug};
+use log::{info, debug, warn};
+use tokio::sync::RwLock;
 
 use crate::ws_server::client_session::ClientSession;
 use rust_websocket_utils::message::WsMessage; // WsMessage 来自我们封装的库
 
-/// 管理所有活动的 WebSocket 客户端会话
+/// `Group` 结构体定义
+/// 
+/// 代表一个客户端组，通常关联到一个特定的任务。
+/// 组内可以包含不同角色的客户端，例如控制中心和现场移动端。
 #[derive(Debug)]
+pub struct Group {
+    /// 组的唯一标识。
+    pub group_id: String,
+    /// 与此组关联的任务ID。
+    /// 在组创建时设定，用于后续的任务状态管理。
+    pub task_id: String,
+    /// 组内的控制中心客户端会话。
+    /// `Option<Arc<ClientSession>>` 表示控制中心客户端可能存在也可能不存在。
+    /// 使用 `Arc` 是因为 `ClientSession` 也可能在 `ConnectionManager` 的主 `clients` 集合中被引用。
+    pub control_center_client: Option<Arc<ClientSession>>,
+    /// 组内的现场移动端客户端会话。
+    pub on_site_mobile_client: Option<Arc<ClientSession>>,
+    // /// (未来可能扩展) 其他类型的客户端或观察者。
+    // pub other_clients: Vec<Arc<ClientSession>>,
+}
+
+impl Group {
+    /// 创建一个新的 `Group` 实例。
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - 组的唯一标识符。
+    /// * `task_id` - 与此组关联的任务ID。
+    ///
+    /// # Returns
+    ///
+    /// 返回一个新的 `Group` 实例，初始时没有任何客户端。
+    pub fn new(group_id: String, task_id: String) -> Self {
+        Self {
+            group_id,
+            task_id,
+            control_center_client: None,
+            on_site_mobile_client: None,
+            // other_clients: Vec::new(),
+        }
+    }
+}
+
+/// 管理所有活动的 WebSocket 客户端会话
+#[derive(Debug, Clone)]
 pub struct ConnectionManager {
     /// 存储所有活动的 ClientSession，使用 DashMap 实现线程安全
     /// Key: client_id (Uuid) - 由 ConnectionManager 生成的会话ID
     /// Value: Arc<ClientSession>
-    clients: Arc<DashMap<Uuid, Arc<ClientSession>>>,
+    pub clients: Arc<DashMap<Uuid, Arc<ClientSession>>>,
+    /// 存储所有活动组的线程安全哈希映射。
+    /// 键是组的唯一ID (`String`)，值是 `Group` 的线程安全读写锁保护的共享引用。
+    /// 使用 `DashMap` 进行高效的并发访问。
+    /// 使用 `Arc<RwLock<Group>>` 允许多个任务并发地读取或修改单个组的信息。
+    pub groups: Arc<DashMap<String, Arc<RwLock<Group>>>>,
 }
 
 impl ConnectionManager {
@@ -26,6 +75,7 @@ impl ConnectionManager {
     pub fn new() -> Self {
         Self {
             clients: Arc::new(DashMap::new()),
+            groups: Arc::new(DashMap::new()),
         }
     }
 

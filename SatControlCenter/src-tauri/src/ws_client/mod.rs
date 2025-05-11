@@ -2,4 +2,6 @@
 
 //! WebSocket 客户端逻辑模块。
 
-pub mod service; 
+pub mod service;
+
+pub use service::WebSocketClientService; 
