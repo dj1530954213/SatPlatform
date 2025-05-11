@@ -23,6 +23,7 @@ pub mod project_details;    // 与项目配置和元数据相关的模型
 pub mod task_info;          // 与调试任务详细信息（状态、步骤等）相关的模型
 pub mod ws_payloads;        // WebSocket 通信中使用的各种消息负载结构体
 pub mod enums;              // 项目中通用的枚举类型定义
+pub mod task_models;        // 新增：与调试任务具体状态和业务交互相关的模型 (P3.3.1)
 
 /// 一个简单的示例函数，用于演示 crate 的基本功能和测试。
 /// 在实际的 `common_models` 库中，此类通用工具函数可能较少，主要侧重于数据结构定义。
@@ -49,3 +50,12 @@ mod tests {
         assert_eq!(result, 4);   // 断言结果是否等于 4
     }
 }
+
+// 重新导出模块中的主要结构体，方便外部 crate 直接使用
+// 例如： use common_models::ProjectDetails;
+// 而不是 use common_models::project_details::ProjectDetails;
+// pub use project_details::*; // 移除未使用的导入
+// pub use task_info::*;       // 移除未使用的导入
+pub use ws_payloads::*;
+pub use enums::*;
+pub use task_models::*; // 新增：导出 task_models 中的所有公共项 (P3.3.1)

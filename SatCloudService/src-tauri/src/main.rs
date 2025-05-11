@@ -1,5 +1,6 @@
 // SatCloudService/src-tauri/src/main.rs
 
+use tauri::Manager; // 新增：导入 Manager trait 以使用 app.manage()
 // use tauri::Manager; // 暂时注释掉未使用的导入，后续如需使用应用句柄可取消注释
 use log::{error, info, LevelFilter}; // 引入日志宏 (error, info) 和日志级别过滤器 (LevelFilter)
 use sat_cloud_service::ws_server::service::WsService; // 引入 WebSocket 服务实现

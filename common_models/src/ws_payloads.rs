@@ -24,6 +24,23 @@ pub const REGISTER_RESPONSE_MESSAGE_TYPE: &str = "RegisterResponse";
 /// 伙伴状态更新消息类型 - 服务器通知组内一个客户端其伙伴的在线状态变化。
 pub const PARTNER_STATUS_UPDATE_MESSAGE_TYPE: &str = "PartnerStatusUpdate";
 
+// --- 任务调试相关消息类型 (P3.3.1) ---
+
+/// 用于客户端（现场端或中心端）更新预检查项状态的消息类型。
+pub const UPDATE_PRE_CHECK_ITEM_TYPE: &str = "UpdatePreCheckItem";
+
+/// 用于中心端向现场端发起（指令执行）单体测试步骤的消息类型。
+pub const START_SINGLE_TEST_STEP_TYPE: &str = "StartSingleTestStep";
+
+/// 用于现场端向中心端反馈单体测试步骤执行结果的消息类型。
+pub const FEEDBACK_SINGLE_TEST_STEP_TYPE: &str = "FeedbackSingleTestStep";
+
+/// 用于中心端确认现场端反馈的单体测试步骤结果的消息类型。
+pub const CONFIRM_SINGLE_TEST_STEP_TYPE: &str = "ConfirmSingleTestStep";
+
+/// 用于云端主动向客户端推送完整的、已更新的任务调试状态的消息类型。
+pub const TASK_STATE_UPDATE_MESSAGE_TYPE: &str = "TaskStateUpdate";
+
 /// EchoPayload 是一个简单的负载，用于测试 WebSocket 通信。
 /// 它包含一个字符串内容，期望被服务器回显。
 ///

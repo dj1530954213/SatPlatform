@@ -38,3 +38,6 @@ pub mod task_state_manager;
 // 或者，如果某些子模块中的类型需要在 `ws_server` 模块级别被方便地重导出，
 // 也可以在这里使用 `pub use` 语句。
 // 例如: `pub use client_session::ClientRole;` (如果 ClientRole 定义在 client_session.rs 中) 
+
+// --- P3.3.1: 明确导出 TaskStateManager --- 
+pub use task_state_manager::TaskStateManager; 

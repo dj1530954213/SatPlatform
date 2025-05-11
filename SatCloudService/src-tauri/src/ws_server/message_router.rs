@@ -36,6 +36,9 @@ use common_models::ws_payloads::{ // 从共享模型库引入 WebSocket 消息�
     RegisterResponsePayload, // 用于服务端对客户端注册/加入组请求的响应的负载结构体定义 (P3.1.2 新增)。
     // 提醒 (P3.3.2): 未来与具体业务逻辑相关的负载类型 (例如 UpdatePreCheckItemPayload, StartSingleTestStepPayload 等)
     // 也应在此处或相应的业务模型模块中定义，并可能需要在此 MessageRouter 中添加处理分支。
+    // ECHO_MESSAGE_TYPE, PING_MESSAGE_TYPE, REGISTER_MESSAGE_TYPE, // 移除这些具名导入
+    // ERROR_RESPONSE_MESSAGE_TYPE, // 移除这个具名导入
+    // PONG_MESSAGE_TYPE, REGISTER_RESPONSE_MESSAGE_TYPE, PARTNER_STATUS_UPDATE_MESSAGE_TYPE, // 其他可能用到的
 };
 use rust_websocket_utils::message::WsMessage; // 从公司内部的 WebSocket 工具库引入标准 WebSocket 消息体结构定义。
 use super::client_session::ClientSession; // 引入同一模块层级下的 `client_session` 子模块中定义的 `ClientSession` 结构体。
@@ -220,8 +223,8 @@ pub async fn handle_message(
                 }
                 Err(e) => { // 如果 `PingPayload` 反序列化失败...
                     warn!(
-                        "[消息路由] 客户端 {} (地址: {})：解析 Ping (心跳) 请求的负载 (PingPayload) 失败: {}. 原始JSON负载: '{}'. "
-                        + "由于 Ping 消息的负载通常预期为空或非常简单，通常不对此类解析错误回复错误消息给客户端，以避免不必要的网络流量。",
+                        "[消息路由] 客户端 {} (地址: {})：解析 Ping (心跳) 请求的负载 (PingPayload) 失败: {}. 原始JSON负载: '{}'. \
+                        由于 Ping 消息的负载通常预期为空或非常简单，通常不对此类解析错误回复错误消息给客户端，以避免不必要的网络流量。",
                         client_session.client_id, client_session.addr, e, message.payload
                     );
                     // 对于 Ping 消息的负载解析失败，通常不建议向客户端发送 ErrorResponse，
@@ -427,44 +430,36 @@ async fn send_error_response(
     original_message_type: Option<String>, // 可选的原始消息类型，用于帮助客户端关联错误来源
     error_message_text: String,            // 描述错误的具体文本信息
 ) {
-    // 构造标准错误响应负载 (ErrorResponsePayload)
+    // 构造标准的 ErrorResponsePayload，包含原始消息类型（如果提供）和错误文本。
     let error_payload = ErrorResponsePayload {
-        success: false, // 明确指示操作/请求失败
-        message: error_message_text.clone(), // 包含具体的错误描述文本
-        request_type: original_message_type, // 包含与此错误相关的原始请求消息类型 (如果提供)
+        original_message_type, // 正确的字段名
+        error: error_message_text.clone(), // 正确的字段名
     };
-
     info!(
-        "[消息路由::错误响应] 准备向客户端 {} (地址: {}) 发送错误响应。错误信息: '{}', 原始请求类型: {:?}",
-        client_session.client_id, client_session.addr, error_message_text, error_payload.request_type
+        "[消息路由::错误响应] 正在向客户端 {} (地址: {}) 发送错误响应。原始消息类型 (如果提供): {:?}, 错误文本: '{}'",
+        client_session.client_id, client_session.addr, error_payload.original_message_type, error_payload.error
     );
 
-    // 尝试创建包含此错误负载的 WebSocket 消息 (WsMessage)
-    // 使用 `ws_payloads::ERROR_RESPONSE_MESSAGE_TYPE` 作为标准错误响应的消息类型。
+    // 使用 WsMessage::new 来构造消息，它会处理 message_id 和 timestamp
     match WsMessage::new(ws_payloads::ERROR_RESPONSE_MESSAGE_TYPE.to_string(), &error_payload) {
-        Ok(error_ws_msg) => { // 如果 WsMessage 创建成功...
-            // 尝试通过客户端会话的 sender 将此错误消息异步发送出去。
-            if let Err(e) = client_session.sender.send(error_ws_msg).await {
-                // 如果发送错误响应本身也失败了 (例如，客户端恰好在此时断开连接)，
-                // 则记录一个更严重的错误，因为我们未能通知客户端发生了问题。
+        Ok(ws_message) => {
+            // 尝试通过客户端的 sender 将 WsMessage 发送出去。
+            if let Err(e) = client_session.sender.send(ws_message).await {
                 error!(
-                    "[消息路由::错误响应] 向客户端 {} (地址: {}) 发送错误响应消息时再次失败: {}. "
-                    + "原始错误是: '{}'. 客户端可能已断开连接，无法接收此错误通知。",
-                    client_session.client_id, client_session.addr, e, error_message_text
+                    "[消息路由::错误响应] 向客户端 {} (地址: {}) 发送错误响应消息时，通过其内部MPSC通道发送失败: {}. 错误响应未能送达。",
+                    client_session.client_id, client_session.addr, e
                 );
             } else {
-                // 如果错误响应成功发送，记录日志。
                 debug!(
-                    "[消息路由::错误响应] 已成功向客户端 {} (地址: {}) 发送错误响应。错误: '{}'",
-                    client_session.client_id, client_session.addr, error_message_text
+                    "[消息路由::错误响应] 错误响应消息已成功提交到客户端 {} (地址: {}) 的MPSC发送通道。",
+                    client_session.client_id, client_session.addr
                 );
             }
         }
-        Err(e) => { // 如果 `WsMessage::new` 创建错误响应消息本身失败 (这通常表示内部序列化问题，非常罕见)
+        Err(e) => { // 如果 WsMessage::new 创建失败 (例如内部序列化失败)
             error!(
-                "[消息路由::错误响应] 为向客户端 {} (地址: {}) 发送错误通知而创建 WsMessage (错误类型) 时发生内部严重错误: {}. "
-                + "原始要报告的错误是: '{}'. 序列化负载详情: {:?}",
-                client_session.client_id, client_session.addr, e, error_message_text, error_payload
+                "[消息路由::错误响应] 严重内部错误：为 ErrorResponsePayload 创建 WsMessage 失败: {}. 错误详情: {:?}. 原始错误文本: '{}'. 客户端 {} 未能收到错误响应。",
+                e, error_payload, error_message_text, client_session.client_id
             );
         }
     }

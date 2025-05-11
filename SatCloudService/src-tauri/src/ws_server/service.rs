@@ -164,8 +164,8 @@ impl WsService {
                     // 可能会给问题追踪和调试带来不便。等待 `rust_websocket_utils` 库的后续更新来解决此问题。
                     let actual_addr: std::net::SocketAddr = "0.0.0.0:0".parse().expect("内部严重错误：无法解析占位符 SocketAddr (套接字地址)！请检查代码。");
                     warn!(
-                        "[WebSocket服务层] 新客户端连接 (其会话ID稍后分配) **重要注意**：当前为此连接使用了固定的占位符网络地址 '{}'。"
-                        + "这并非客户端的真实IP和端口。请尽快检查或推动 `rust_websocket_utils` 库的更新，以确保 `WsConnectionHandler` (WebSocket 连接处理器) 能够正确提供并传递真实的客户端网络地址。",
+                        "[WebSocket服务层] 新客户端连接 (其会话ID稍后分配) **重要注意**：当前为此连接使用了固定的占位符网络地址 '{}'. \
+                        这并非客户端的真实IP和端口。请尽快检查或推动 `rust_websocket_utils` 库的更新，以确保 `WsConnectionHandler` (WebSocket 连接处理器) 能够正确提供并传递真实的客户端网络地址。",
                         actual_addr
                     );
 
@@ -182,10 +182,10 @@ impl WsService {
                     // 仅能停止处理该连接上的进一步消息，并依赖于更底层的超时或错误来最终回收资源。
                     let close_handle = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     warn!(
-                        "[WebSocket服务层] 新客户端连接 (其会话ID稍后分配，占位符地址: {}) **重要注意**：当前为该连接创建了一个本地的逻辑关闭标志 (`Arc<AtomicBool>`)。"
-                        + "通过此标志从 `ConnectionManager` (连接管理器) 发起的连接关闭请求，其主要作用是通知本模块内部的消息收发任务终止。"
-                        + "物理连接的实际和及时关闭，依赖于 `rust_websocket_utils` 库中相关组件 (`WsConnectionHandler`, `SplitStream`) 的 `Drop` (销毁) 实现的健壮性。"
-                        + "为了确保服务器能够更可控、更主动地管理物理连接的关闭，强烈建议增强 `rust_websocket_utils` 库，使其提供自身的、明确的物理连接关闭句柄或机制。",
+                        "[WebSocket服务层] 新客户端连接 (其会话ID稍后分配，占位符地址: '{}') **重要注意**：当前为该连接创建了一个本地的逻辑关闭标志 (`Arc<AtomicBool>`). \
+                        通过此标志从 `ConnectionManager` (连接管理器) 发起的连接关闭请求，其主要作用是通知本模块内部的消息收发任务终止. \
+                        物理连接的实际和及时关闭，依赖于 `rust_websocket_utils` 库中相关组件 (`WsConnectionHandler`, `SplitStream`) 的 `Drop` (销毁) 实现的健壮性. \
+                        为了确保服务器能够更可控、更主动地管理物理连接的关闭，强烈建议增强 `rust_websocket_utils` 库，使其提供自身的、明确的物理连接关闭句柄或机制。",
                         actual_addr
                     );
 
@@ -202,8 +202,8 @@ impl WsService {
                     ).await; // `add_client` (添加客户端) 是一个异步方法。
                     
                     info!(
-                        "[WebSocket服务层] 新客户端已成功连接并注册到 ConnectionManager (连接管理器)。分配的会话ID: {}, 使用的(占位符)地址: {:?}. "
-                        + "现在将为此客户端连接启动并发的消息发送和接收任务。",
+                        "[WebSocket服务层] 新客户端已成功连接并注册到 ConnectionManager (连接管理器)。分配的会话ID: {}, 使用的(占位符)地址: {:?}. \
+                        现在将为此客户端连接启动并发的消息发送和接收任务。",
                         client_session.client_id,
                         client_session.addr // 再次提醒：此地址当前是占位符，并非真实客户端地址
                     );
@@ -332,25 +332,17 @@ impl WsService {
                         // 这是因为 `tokio::select!` 要求其监听的所有 future (异步操作) 都必须是 `Unpin` (可以安全地在内存中移动的)。
                         // 而直接由异步函数调用产生的 future 可能不是 `Unpin` 的 (特别是如果它们内部有自引用)。
                         // `Box::pin` 将这个 future "固定"到堆内存上，从而使其满足 `Unpin` 的约束。
-                        let mut receive_fut = Box::pin(receive_message(&mut ws_receiver)); 
+                        let receive_fut = Box::pin(receive_message(&mut ws_receiver));
                         let received_result = tokio::select! {
-                            biased; // `biased` 关键字指示 `select!` 在有多个分支同时就绪时，优先处理排列在前面的分支。
-                                    // 这里主要是为了确保 `receive_fut` (实际的消息接收操作) 能够被优先尝试。
-                            
-                            // 分支1: 监听 `receive_message` 异步函数的结果。
-                            // 当 `receive_message` 完成时 (无论是成功接收到消息还是发生错误)，`res` 将会是 `Result<ActualWsMessage, WsError>`。
-                            // 我们将这个 `Result` 包装在 `Some` 里面，以便与下面的超时情况 (超时分支返回 `None`) 进行区分。
-                            res = &mut receive_fut => Some(res), 
-                            
-                            // 分支2: 监听一个1秒钟的超时。如果在这1秒钟内，上面的 `receive_fut` (消息接收操作) 没有完成，
-                            // 那么这个 `tokio::time::sleep` (休眠) 分支就会被选中，并导致 `received_result` 被赋值为 `None`。
+                            biased; 
+                            result_val = receive_fut => Some(result_val), 
                             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None, 
                         };
 
-                        match received_result { // `received_result` 的类型是 `Option<Result<ActualWsMessage, WsError>>`
-                            Some(Ok(ws_msg)) => { // 情况 1: `Some(Ok(msg))` 表示：在超时前成功接收并解析了一个有效的 `ActualWsMessage` (实际 WebSocket 消息)。
-                                // 将接收到的消息以及相关的上下文信息 (客户端会话、连接管理器) 传递给消息路由器进行后续处理。
-                                // `message_router::handle_message` (消息路由器的处理函数) 本身也是一个异步函数。
+                        // 编译器推断 received_result 为 Option<Option<Result<WsMessage, WsError>>>
+                        // 因此我们需要双重解包
+                        match received_result {
+                            Some(Some(Ok(ws_msg))) => { // 情况 1: 成功接收并解析
                                 if let Err(e) = message_router::handle_message(
                                     Arc::clone(&client_session_clone_for_router), // 传递对 ClientSession (客户端会话) 的共享引用
                                     ws_msg,                                       // 传递刚接收到的 ActualWsMessage (实际 WebSocket 消息)
@@ -371,13 +363,12 @@ impl WsService {
                                     // 如果错误确实是灾难性的，那么 `handle_message` (消息处理函数) 自身或者其调用的业务逻辑应该考虑如何影响服务或连接的整体状态 (例如，通过设置关闭标志)。
                                 }
                             }
-                            Some(Err(ws_err)) => { // 情况 2: `Some(Err(err))` 表示：在超时前，`receive_message` (接收消息) 函数在尝试从 `ws_receiver` 接收或解析消息时发生了 `WsError` (WebSocket错误)。
-                                // 我们需要根据 `rust_websocket_utils` 库返回的 `WsError` (WebSocket错误) 的具体类型来决定如何响应。
+                            Some(Some(Err(ws_err))) => { // 情况 2: 接收时发生 WsError
                                 match ws_err {
-                                    WsError::DeserializationError(e) => { // 子情况 2.1: 如果错误是消息负载反序列化失败...
+                                    WsError::DeserializationError(e) => { 
                                         warn!(
-                                            "[WebSocket服务层-接收循环 {}] 从客户端接收到的某条消息，在 `rust_websocket_utils::receive_message` (接收消息) 内部阶段发生负载反序列化错误: {}. "
-                                            + "这通常意味着客户端发送了格式不正确或类型不匹配的JSON负载。消息路由器 (`message_router`) 通常会尝试向客户端发送具体的错误响应。接收循环将继续。",
+                                            "[WebSocket服务层-接收循环 {}] 从客户端接收到的某条消息，在 `rust_websocket_utils::receive_message` (接收消息) 内部阶段发生负载反序列化错误: {}. \
+                                            这通常意味着客户端发送了格式不正确或类型不匹配的JSON负载。消息路由器 (`message_router`) 通常会尝试向客户端发送具体的错误响应。接收循环将继续。",
                                             client_session_clone_for_router.client_id, e
                                         );
                                         // 重要提示：单个消息的负载反序列化失败通常不应该导致整个 WebSocket 连接被中断。
@@ -391,25 +382,25 @@ impl WsService {
                                     }
                                     WsError::WebSocketProtocolError(e) => { // 子情况 2.2: 如果是 WebSocket 协议级别的错误 (例如，无效的帧序列、不符合协议的握手后行为等)...
                                         warn!(
-                                            "[WebSocket服务层-接收循环 {}] 检测到严重的 WebSocket 协议级错误: {}. "
-                                            + "这通常表示客户端行为异常，或者网络连接已严重损坏。接收与处理循环即将因此终止。",
+                                            "[WebSocket服务层-接收循环 {}] 检测到严重的 WebSocket 协议级错误: {}. \
+                                            这通常表示客户端行为异常，或者网络连接已严重损坏。接收与处理循环即将因此终止。",
                                             client_session_clone_for_router.client_id, e
                                         );
                                         client_session_clone_for_router.connection_should_close.store(true, std::sync::atomic::Ordering::SeqCst); // 主动设置逻辑关闭标志
                                         break; // WebSocket 协议错误通常被认为是不可恢复的，应立即终止此连接的处理。
                                     }
-                                    WsError::ConnectionClosed => { // 子情况 2.3: 如果 `rust_websocket_utils::receive_message` (接收消息) 明确返回 `ConnectionClosed` (连接已关闭) 错误...
+                                    WsError::IoError(ref io_err) if matches!(io_err.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionAborted) => {
                                         info!(
-                                            "[WebSocket服务层-接收循环 {}] 底层 `receive_message` (接收消息) 函数报告连接已被对端关闭 (返回 WsError::ConnectionClosed)。接收与处理循环即将因此终止。",
-                                            client_session_clone_for_router.client_id
+                                            "[WebSocket服务层-接收循环 {}] 检测到 IO 错误表明连接已关闭 (例如 ConnectionReset, BrokenPipe, ConnectionAborted): {:?}. 接收与处理循环即将因此终止。",
+                                            client_session_clone_for_router.client_id, io_err.kind()
                                         );
-                                        client_session_clone_for_router.connection_should_close.store(true, std::sync::atomic::Ordering::SeqCst); // 确保逻辑关闭标志也被设置
-                                        break; // 连接既然已被关闭，自然应终止接收循环。
+                                        client_session_clone_for_router.connection_should_close.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        break;
                                     }
                                     WsError::Message(s) => { // 子情况 2.4: 如果是 `rust_websocket_utils` 内部定义的、通过字符串消息传递的通用错误...
                                         warn!(
-                                            "[WebSocket服务层-接收循环 {}] 底层 `receive_message` (接收消息) 函数报告了一个内部消息错误: '{}'. "
-                                            + "由于此类错误的具体性质未知，我们将根据其潜在的严重性，假定连接可能存在问题，并终止接收与处理循环。",
+                                            "[WebSocket服务层-接收循环 {}] 底层 `receive_message` (接收消息) 函数报告了一个内部消息错误: '{}'. \
+                                            由于此类错误的具体性质未知，我们将根据其潜在的严重性，假定连接可能存在问题，并终止接收与处理循环。",
                                             client_session_clone_for_router.client_id, s
                                         );
                                         client_session_clone_for_router.connection_should_close.store(true, std::sync::atomic::Ordering::SeqCst); // 主动设置逻辑关闭标志
@@ -422,8 +413,8 @@ impl WsService {
                                     // 对于这些类型的错误，通常也应被认为是连接级的问题，并应导致接收循环的终止。
                                     other_ws_err => { // 子情况 2.5: 捕获所有其他未被前面分支明确处理的 `WsError` (WebSocket错误) 类型。
                                         error!(
-                                            "[WebSocket服务层-接收循环 {}] 从底层 `receive_message` (接收消息) 函数收到了一个当前未被明确处理的 WsError (WebSocket错误) 类型: {:?}. "
-                                            + "为确保系统稳定性并避免未知行为，我们将采取保守策略，假定连接存在严重问题，并因此终止接收与处理循环。",
+                                            "[WebSocket服务层-接收循环 {}] 从底层 `receive_message` (接收消息) 函数收到了一个当前未被明确处理的 WsError (WebSocket错误) 类型: {:?}. \
+                                            为确保系统稳定性并避免未知行为，我们将采取保守策略，假定连接存在严重问题，并因此终止接收与处理循环。",
                                             client_session_clone_for_router.client_id, other_ws_err
                                         );
                                         client_session_clone_for_router.connection_should_close.store(true, std::sync::atomic::Ordering::SeqCst); // 主动设置逻辑关闭标志
@@ -431,14 +422,18 @@ impl WsService {
                                     }
                                 }
                             }
-                            None => { // 情况 3: `None` 表示 `tokio::select!` 中的 `tokio::time::sleep` (休眠) 分支被选中，即消息接收在一秒内超时。
-                                // 接收超时本身并不是一个错误。这仅仅表示在设定的超时期限内，客户端没有发送任何新的消息。
-                                // 接收循环将继续运行，以便在下一次迭代中再次检查逻辑关闭信号并重新尝试从网络接收消息。
+                            Some(None) => { // 情况 3: 内部 Option 是 None - 理论上不应由当前 select! 逻辑产生
+                                error!(
+                                    "[WebSocket服务层-接收循环 {}] UNEXPECTED: tokio::select! 产生了 Some(None) 结果。这表示 receive_fut 可能返回了 Option<T> 而不是 Result<T,E>，或者 select! 行为异常。",
+                                    client_session_clone_for_router.client_id
+                                );
+                                // 也许应该关闭连接？
+                            }
+                            None => { // 情况 4: 超时 (外部 Option 是 None)
                                 debug!(
                                     "[WebSocket服务层-接收循环 {}] 在尝试从客户端WebSocket连接接收新消息时发生了一次短暂的超时 (1秒)。将继续监听后续消息。",
                                     client_session_clone_for_router.client_id
                                 );
-                                // 此处无需执行 `break` 或 `continue`；`loop` (循环) 将自然地进入下一次迭代。
                             }
                         } // match received_result (匹配接收结果) 的结束
                     } // loop (接收与处理循环) 的结束
@@ -515,5 +510,3 @@ impl WsService {
         })
     } // start (启动) 方法的结束
 } // impl WsService (WebSocket 服务实现) 的结束
-
-</rewritten_file>

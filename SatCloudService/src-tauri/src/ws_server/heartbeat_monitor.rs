@@ -132,7 +132,7 @@ impl HeartbeatMonitor {
 
         let now = Utc::now(); // 获取当前的协调世界时 (UTC) 时间戳，作为所有比较的基准。
 
-        for client_session in clients_snapshot { // 遍历从快照中获取的每个客户端会话的共享引用
+        for client_session in &clients_snapshot { // 遍历从快照中获取的每个客户端会话的共享引用 - 使用 & 避免移动
             let client_id = client_session.client_id; // 获取当前正在检查的客户端的唯一ID
             
             // 异步读取此客户端会话中记录的最后活跃时间 (`last_seen`)。
@@ -147,8 +147,8 @@ impl HeartbeatMonitor {
                 Ok(duration) => duration, // 转换成功，使用配置的超时时长
                 Err(e) => { // 如果转换失败 (例如，配置值异常导致无法转换为有效的 chrono::Duration)
                     warn!(
-                        "[心跳监视器] 无法将配置的 client_timeout_duration ({:?}) 从 std::time::Duration 转换为 chrono::Duration: {}. "
-                        + "本次检查将针对客户端 {} (ID: {}) 使用一个备用的60秒超时阈值。请检查配置。", 
+                        "[心跳监视器] 无法将配置的 client_timeout_duration ({:?}) 从 std::time::Duration 转换为 chrono::Duration: {}. \
+                        本次检查将针对客户端 {} (ID: {}) 使用一个备用的60秒超时阈值。请检查配置。",
                         self.client_timeout_duration, e, client_session.addr, client_id
                     );
                     chrono::Duration::seconds(60) // 提供一个安全的、硬编码的备用超时值 (例如60秒)
