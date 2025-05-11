@@ -2,21 +2,24 @@
 
 //! WebSocket 连接管理。
 
-use std::sync::Arc;
-use std::net::SocketAddr;
-use dashmap::DashMap;
-use tokio::sync::mpsc;
-use uuid::Uuid;
-use log::{info, debug, warn};
-use tokio::sync::RwLock;
-
 use crate::ws_server::client_session::ClientSession;
-use rust_websocket_utils::message::WsMessage; // WsMessage 来自我们封装的库
-use crate::ws_server::task_state_manager::TaskStateManager; // P3.1.2: 引入 TaskStateManager
+use crate::ws_server::task_state_manager::TaskStateManager;
 use common_models::enums::ClientRole;
 use common_models::ws_payloads::{
-    RegisterPayload, RegisterResponsePayload, PARTNER_STATUS_UPDATE_MESSAGE_TYPE, PartnerStatusPayload,
+    PartnerStatusPayload, RegisterPayload, RegisterResponsePayload, PARTNER_STATUS_UPDATE_MESSAGE_TYPE,
 };
+// 修正 WsMessage 的引入路径，移除错误的 common_models::ws_messages::WsMessage
+use rust_websocket_utils::message::WsMessage;
+// use rust_websocket_utils::error::WsError; // WsError 未使用，移除
+
+use dashmap::DashMap;
+use log::{debug, error, info, warn}; // 确保所有日志宏都可用
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use uuid::Uuid;
+use std::net::SocketAddr;
+use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering}; // 确保 Ordering 被导入
 
 /// `Group` 结构体定义
 /// 
@@ -30,50 +33,31 @@ pub struct Group {
     /// 在组创建时设定，用于后续的任务状态管理。
     pub task_id: String,
     /// 组内的控制中心客户端会话。
-    /// `Option<Arc<ClientSession>>` 表示控制中心客户端可能存在也可能不存在。
-    /// 使用 `Arc` 是因为 `ClientSession` 也可能在 `ConnectionManager` 的主 `clients` 集合中被引用。
     pub control_center_client: Option<Arc<ClientSession>>,
     /// 组内的现场移动端客户端会话。
     pub on_site_mobile_client: Option<Arc<ClientSession>>,
-    // /// (未来可能扩展) 其他类型的客户端或观察者。
-    // pub other_clients: Vec<Arc<ClientSession>>,
 }
 
 impl Group {
     /// 创建一个新的 `Group` 实例。
-    ///
-    /// # Arguments
-    ///
-    /// * `group_id` - 组的唯一标识符。
-    /// * `task_id` - 与此组关联的任务ID。
-    ///
-    /// # Returns
-    ///
-    /// 返回一个新的 `Group` 实例，初始时没有任何客户端。
     pub fn new(group_id: String, task_id: String) -> Self {
         Self {
             group_id,
             task_id,
             control_center_client: None,
             on_site_mobile_client: None,
-            // other_clients: Vec::new(),
         }
     }
 }
 
 /// 管理所有活动的 WebSocket 客户端会话
-#[derive(Debug, Clone)]
+// 移除 Debug 派生，因为 TaskStateManager 可能未实现 Debug
+#[derive(Clone)] 
 pub struct ConnectionManager {
-    /// 存储所有活动的 ClientSession，使用 DashMap 实现线程安全
-    /// Key: client_id (Uuid) - 由 ConnectionManager 生成的会话ID
-    /// Value: Arc<ClientSession>
-    pub clients: Arc<DashMap<Uuid, Arc<ClientSession>>>,
-    /// 存储所有活动组的线程安全哈希映射。
-    /// 键是组的唯一ID (`String`)，值是 `Group` 的线程安全读写锁保护的共享引用。
-    /// 使用 `DashMap` 进行高效的并发访问。
-    /// 使用 `Arc<RwLock<Group>>` 允许多个任务并发地读取或修改单个组的信息。
-    pub groups: Arc<DashMap<String, Arc<RwLock<Group>>>>,
-    pub task_state_manager: Arc<TaskStateManager>, // P3.1.2: 添加 TaskStateManager 引用
+    // 将字段设为私有
+    clients: Arc<DashMap<Uuid, Arc<ClientSession>>>,
+    groups: Arc<DashMap<String, Arc<RwLock<Group>>>>,
+    task_state_manager: Arc<TaskStateManager>,
 }
 
 impl ConnectionManager {
@@ -83,145 +67,327 @@ impl ConnectionManager {
         Self {
             clients: Arc::new(DashMap::new()),
             groups: Arc::new(DashMap::new()),
-            task_state_manager, // P3.1.2: 初始化 TaskStateManager 引用
+            task_state_manager,
         }
     }
 
-    /// 添加一个新的客户端会话到管理器中。
-    /// 此方法应由 TransportLayer 在接受新的 WebSocket 连接后调用。
+    /// 添加一个新的客户端到连接管理器。
     ///
     /// # Arguments
-    /// * `addr` - 新连接客户端的 SocketAddr。
-    /// * `sender` - 用于向该客户端发送消息的 mpsc::Sender。
+    /// * `addr` - 客户端的 SocketAddr。
+    /// * `sender` - 用于向此客户端发送消息的 mpsc Sender。
+    /// * `connection_should_close` - 一个 Arc<AtomicBool>，用于从外部通知连接处理任务关闭连接。
     ///
     /// # Returns
     /// 返回新创建的 `Arc<ClientSession>`。
-    pub async fn add_client(&self, addr: SocketAddr, sender: mpsc::Sender<WsMessage>) -> Arc<ClientSession> {
-        let client_id = Uuid::new_v4(); // 生成唯一的会话ID
-        let client_session = Arc::new(ClientSession::new(client_id, sender, addr));
+    pub async fn add_client(
+        &self,
+        addr: SocketAddr,
+        sender: mpsc::Sender<WsMessage>,
+        connection_should_close: Arc<AtomicBool>, // 新增参数
+    ) -> Arc<ClientSession> {
+        // ClientSession::new 现在需要 connection_should_close
+        // 并且 ClientSession::new 内部会生成 client_id
+        let client_session = Arc::new(ClientSession::new(
+            addr,                       // 第一个参数是 addr
+            sender,                     // 第二个参数是 sender
+            connection_should_close,    // 第三个参数是 connection_should_close
+        ));
         
-        self.clients.insert(client_id, Arc::clone(&client_session));
-        
-        info!("新客户端连接成功: id={}, addr={}, 初始角色={:?}", 
-              client_session.client_id, client_session.addr, *client_session.role.read().await);
-        debug!("客户端会话详情 (添加时): {:?}", client_session);
-        debug!("当前活动客户端总数: {}", self.clients.len());
+        self.clients
+            .insert(client_session.client_id, Arc::clone(&client_session)); // 使用 client_session 内部生成的 client_id
+        info!(
+            "[ConnectionManager] 新客户端连接成功: id={}, addr={}, 初始角色={:?}", 
+            client_session.client_id, client_session.addr, *client_session.role.read().await);
+        debug!("[ConnectionManager] 客户端会话详情 (添加时): {:?}", client_session);
+        debug!("[ConnectionManager] 当前活动客户端总数: {}", self.clients.len());
 
         client_session
     }
 
-    /// 根据 client_id 获取一个客户端会话的引用。
+    /// 从管理器中移除一个客户端会话。
     ///
     /// # Arguments
-    /// * `client_id` - 要查找的客户端的 Uuid。
-    ///
-    /// # Returns
-    /// 如果找到，则返回 `Some(Arc<ClientSession>)`，否则返回 `None`。
-    pub async fn get_client(&self, client_id: &Uuid) -> Option<Arc<ClientSession>> {
-        self.clients.get(client_id).map(|entry| Arc::clone(entry.value()))
+    /// * `client_id` - 要移除的客户端的ID。
+    pub async fn remove_client(&self, client_id: &Uuid) {
+        info!("[ConnectionManager] Attempting to remove client: {}", client_id);
+
+        if let Some((_id, client_session)) = self.clients.remove(client_id) {
+            info!(
+                "[ConnectionManager] Client {} found and removed from active clients list.",
+                client_id
+            );
+            // 请求关闭物理连接
+            // 这一步确保如果 remove_client 是首次被调用 (例如由 HeartbeatMonitor 调用)，
+            // 它会触发物理连接的关闭。
+            // 如果 remove_client 是因为物理连接已关闭而被调用 (例如由 WsService 的连接处理任务结束时调用)，
+            // 那么这个 store 操作是无害的 (连接已在关闭过程中或已关闭)。
+            client_session
+                .connection_should_close
+                .store(true, Ordering::SeqCst);
+            
+            // Yield to allow WsService loops to potentially observe the flag immediately
+            tokio::task::yield_now().await;
+
+            debug!(
+                "[ConnectionManager] Requested underlying connection to close for client: {}",
+                client_id
+            );
+
+            let role_at_disconnect = client_session.role.read().await.clone();
+            let group_id_option = client_session.group_id.read().await.clone();
+
+            if let Some(group_id) = group_id_option {
+                if role_at_disconnect == ClientRole::Unknown {
+                    info!("[ConnectionManager] Client {} (Role: Unknown) was not in any effective group. No group cleanup needed.", client_id);
+                    // 注意：这里不再直接 return，因为即使角色未知，也可能需要从 clients 列表中移除。
+                    // 但由于已从 clients.remove 成功，所以主要关注点是组逻辑。
+                } else {
+                    info!(
+                        "[ConnectionManager] Client {} (Role: {:?}) was part of group '{}'. Processing group removal and partner notification.",
+                        client_id, role_at_disconnect, group_id
+                    );
+                    if let Some(group_lock) = self.groups.get(&group_id) {
+                        let mut group = group_lock.write().await;
+                        info!(
+                            "[ConnectionManager] Processing group '{}' for client {} removal (Role: {:?}).",
+                            group_id, client_id, role_at_disconnect
+                        );
+
+                        let mut partner_session_option: Option<Arc<ClientSession>> = None;
+
+                        match role_at_disconnect {
+                            ClientRole::ControlCenter => {
+                                if let Some(cc_session) = &group.control_center_client {
+                                    if cc_session.client_id == *client_id {
+                                        group.control_center_client = None;
+                                        info!("[ConnectionManager] Removed ControlCenter (ID: {}) from group '{}'.", client_id, group_id);
+                                        partner_session_option = group.on_site_mobile_client.clone();
+                                    } else {
+                                        warn!("[ConnectionManager] ControlCenter in group '{}' (ID: {}) does not match client being removed (ID: {}). No change made.", 
+                                            group_id, cc_session.client_id, client_id);
+                                    }
+                                } else {
+                                    info!("[ConnectionManager] No ControlCenter was registered in group '{}' when client {} (Role: ControlCenter) disconnected.", group_id, client_id);
+                                }
+                            }
+                            ClientRole::OnSiteMobile => {
+                                if let Some(os_session) = &group.on_site_mobile_client {
+                                    if os_session.client_id == *client_id {
+                                        group.on_site_mobile_client = None;
+                                        info!("[ConnectionManager] Removed OnSiteMobile (ID: {}) from group '{}'.", client_id, group_id);
+                                        partner_session_option = group.control_center_client.clone();
+                                    } else {
+                                        warn!("[ConnectionManager] OnSiteMobile in group '{}' (ID: {}) does not match client being removed (ID: {}). No change made.", 
+                                            group_id, os_session.client_id, client_id);
+                                    }
+                                } else {
+                                    info!("[ConnectionManager] No OnSiteMobile was registered in group '{}' when client {} (Role: OnSiteMobile) disconnected.", group_id, client_id);
+                                }
+                            }
+                            ClientRole::Unknown => {
+                                // 已在外部处理，理论上不应进入此分支如果 role_at_disconnect 是 Unknown
+                                warn!("[ConnectionManager] Client {} had Unknown role during group processing. This should not happen if filtered earlier.", client_id);
+                            }
+                        }
+
+                        if let Some(partner_session) = partner_session_option {
+                            info!(
+                                "[ConnectionManager] Group '{}' has a partner (ID: {}). Notifying them of client {} (Role: {:?}) going offline.",
+                                group_id, partner_session.client_id, client_id, role_at_disconnect
+                            );
+                            // client_id is &Uuid, *client_id gives Uuid which is Copy.
+                            // group_id is String, needs to be cloned for payload_data if it's to be used later.
+                            // However, payload_data itself is moved into the spawn, so cloning for it is fine.
+                            let payload_data = PartnerStatusPayload {
+                                partner_role: role_at_disconnect.clone(),
+                                partner_client_id: *client_id, 
+                                is_online: false,
+                                group_id: group_id.clone(), // Clone group_id for the payload
+                            };
+
+                            // Prepare owned data for tokio::spawn
+                            let owned_client_id_for_spawn = *client_id; // Uuid is Copy, so this creates an owned copy.
+                            let group_id_for_spawn = group_id.clone(); // Clone group_id for the spawned task.
+                            let partner_session_for_spawn = partner_session.clone(); // Arc is cheap to clone.
+
+                            // Spawn a new task to send the notification to avoid blocking remove_client
+                            tokio::spawn(async move {
+                                // Inside this async block, use owned_client_id_for_spawn and group_id_for_spawn
+                                match serde_json::to_string(&payload_data) { // payload_data is moved here
+                                    Ok(json_payload) => {
+                                        match WsMessage::new(
+                                            PARTNER_STATUS_UPDATE_MESSAGE_TYPE.to_string(),
+                                            &json_payload,
+                                        ) {
+                                            Ok(ws_msg) => {
+                                                if let Err(e) = partner_session_for_spawn.sender.send(ws_msg).await {
+                                                    error!(
+                                                        "[CM SpawnedTask] Failed to send PartnerStatusUpdate (offline) to partner {} in group '{}': {}",
+                                                        partner_session_for_spawn.client_id, group_id_for_spawn, e // Use cloned group_id_for_spawn
+                                                    );
+                                                } else {
+                                                    info!(
+                                                        "[CM SpawnedTask] Successfully sent PartnerStatusUpdate (offline) to partner {} for client {}.",
+                                                        partner_session_for_spawn.client_id, owned_client_id_for_spawn // Use owned_client_id_for_spawn
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("[CM SpawnedTask] Failed to create WsMessage for PartnerStatusUpdate (offline) for group '{}': {}", group_id_for_spawn, e); // Use cloned group_id_for_spawn
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("[CM SpawnedTask] Failed to serialize PartnerStatusPayload (offline) for group '{}': {}", group_id_for_spawn, e); // Use cloned group_id_for_spawn
+                                    }
+                                }
+                            });
+                            // After tokio::spawn, the original group_id is still valid in this scope (if it wasn't moved to payload_data directly, but it was cloned for it)
+                            // and client_id (&Uuid) is also still valid.
+                        } else {
+                            info!("[ConnectionManager] Client {} (Role: {:?}) had no partner in group '{}' at disconnect. No offline notification sent.", client_id, role_at_disconnect, group_id);
+                        }
+
+                        // 检查组是否为空，如果为空则移除组并处理任务状态
+                        if group.control_center_client.is_none() && group.on_site_mobile_client.is_none() {
+                            info!(
+                                "[ConnectionManager] Group '{}' is now empty after client {} disconnected. Removing group.",
+                                group_id, client_id
+                            );
+                            // 从 self.groups 移除组之前先 drop group 的写锁
+                            let task_id_for_removal = group.task_id.clone(); // 克隆 task_id
+                            drop(group); //显式 drop 写锁
+
+                            if self.groups.remove(&group_id).is_some() {
+                                info!("[ConnectionManager] Successfully removed empty group '{}' from ConnectionManager.", group_id);
+                                // TODO: 在P3.3.1中，这里应该调用 self.task_state_manager.remove_task_state(&group_id, &task_id_for_removal).await;
+                                // 暂时只记录日志
+                                debug!(
+                                    "[ConnectionManager] Placeholder for TaskStateManager: Would remove task state for group_id: '{}', task_id: '{}'",
+                                    group_id, task_id_for_removal
+                                );
+                            } else {
+                                warn!("[ConnectionManager] Failed to remove group '{}' from groups map. It might have been removed by another concurrent operation.", group_id);
+                            }
+                        } else {
+                            info!("[ConnectionManager] Group '{}' still has members after client {} disconnected.", group_id, client_id);
+                        }
+                    } else {
+                        warn!("[ConnectionManager] Group '{}' not found for client {} during removal. Partner notification/group cleanup skipped.", group_id, client_id);
+                    }
+                }
+            } else {
+                info!("[ConnectionManager] Client {} was not associated with any group at disconnect. No group-specific cleanup needed.", client_id);
+            }
+        } else {
+            warn!(
+                "[ConnectionManager] Attempted to remove client {}, but it was not found in active clients list. It might have been already removed by another process (e.g., connection drop handler). No further action taken by this call.",
+                client_id
+            );
+            // 如果客户端已不在 active_clients 中，则不执行任何操作，
+            // 因为相关的清理（包括伙伴通知和组移除）应该已经由第一次成功的 remove_client 调用处理了。
+        }
+        debug!(
+            "[ConnectionManager] Remove client {} operation completed. Current active client count: {}",
+            client_id,
+            self.clients.len()
+        );
+        // 因为方法返回类型是 ()，所以不需要显式返回 None 或 Some
     }
     
-    /// 从管理器中移除一个客户端会话。
-    /// 
-    /// 此方法应在客户端连接断开时由 TransportLayer (或其回调) 调用。
-    ///
-    /// # Arguments
-    /// * `client_id` - 要移除的客户端的 Uuid (由 ConnectionManager 生成的会话ID)。
-    ///
-    /// # Returns
-    /// 如果找到并成功移除了会话，则返回被移除的 `Arc<ClientSession>`，否则返回 `None`。
-    pub async fn remove_client(&self, client_id: &Uuid) -> Option<Arc<ClientSession>> {
-        match self.clients.remove(client_id) {
-            Some((_id, session)) => {
-                // 为了日志，克隆必要的信息或在独立的块中读取，以确保锁在 session 被移出前释放
-                let client_id_for_log = session.client_id; // Uuid 是 Clone 的
-                let addr_for_log = session.addr;         // SocketAddr 是 Clone 的
-                let role_val_for_log = {
-                    let role_guard = session.role.read().await;
-                    role_guard.clone() // ClientRole 是 Clone 的
-                }; // role_guard (读锁) 在此代码块结束时被释放
-
-                info!(
-                    "客户端断开连接: id={}, addr={}, 角色={:?}",
-                    client_id_for_log,
-                    addr_for_log,
-                    role_val_for_log
-                );
-                // P3.1.3: 如果客户端属于某个组，则通知组内伙伴此客户端下线。
-                // 此处可以添加对 session.group_id 的检查和处理逻辑。
-
-                debug!("移除后当前活动客户端总数: {}", self.clients.len());
-                Some(session) // 现在可以安全地移动 session
-            }
-            None => {
-                log::warn!(
-                    "尝试移除不存在的客户端: id={}",
-                    client_id
-                );
-                None
-            }
-        }
-    }
-
-    /// 处理客户端加入组的请求。
-    ///
-    /// # Arguments
-    /// * `client_session` - 请求加入组的客户端会话。
-    /// * `payload` - 包含 `group_id`, `role`, `task_id` 的注册负载。
-    ///
-    /// # Returns
-    /// * `Ok(RegisterResponsePayload)` - 如果成功加入或创建组。
-    /// * `Err(RegisterResponsePayload)` - 如果发生错误（例如角色冲突）。
+    // 根据用户提供的版本，join_group 返回 Result<RegisterResponsePayload, RegisterResponsePayload>
     pub async fn join_group(
         &self,
         client_session: Arc<ClientSession>,
         payload: RegisterPayload,
     ) -> Result<RegisterResponsePayload, RegisterResponsePayload> {
-        let group_id = payload.group_id;
-        let requested_role = payload.role;
-        let task_id = payload.task_id;
         let client_id = client_session.client_id;
+        let group_id = payload.group_id.clone();
+        let requested_role = payload.role.clone();
+        // 使用 task_id_payload 变量名以示清晰
+        let task_id_payload = payload.task_id.clone();
 
         info!(
             "[ConnectionManager] 客户端 {} 请求加入组 '{}' (任务 '{}')，角色为: {:?}",
-            client_id, group_id, task_id, requested_role
+            client_id, group_id, task_id_payload, requested_role
         );
 
-        // 1. 组存在性与创建，并获取组的写锁
-        // 使用 DashMap 的 entry API 来原子性地获取或插入
-        let group_entry = self.groups.entry(group_id.clone()).or_insert_with(|| {
-            info!(
-                "[ConnectionManager] 组 '{}' (任务 '{}') 不存在，将创建新组。",
-                group_id, task_id
+        if requested_role == ClientRole::Unknown {
+            warn!(
+                "[ConnectionManager] 客户端 {} 尝试以 Unknown 角色加入组 '{}'。拒绝请求。",
+                client_id, group_id
             );
-            // P3.1.2: 在创建新组时，也应调用 TaskStateManager 初始化任务状态
-            // 由于这是在 or_insert_with 闭包内，且 task_state_manager.init_task_state 是 async, 
-            // 我们不能直接 await。因此，这个调用需要移到获取锁之后，或者 TaskStateManager::new group 时同步处理（如果可能）
-            // 为了简单起见，并且考虑到 init_task_state 的幂等性，我们在获得锁后，如果判断是新创建的组，再调用。
-            // 这里暂时只创建 Group 结构。
-            Arc::new(RwLock::new(Group::new(group_id.clone(), task_id.clone())))
-        });
-        
-        let group_arc_rwlock = group_entry.value().clone(); // 获取 Arc<RwLock<Group>>
-        let mut group_guard = group_arc_rwlock.write().await; // 获取组的写锁
-
-        // 检查是否是新创建的组，如果是，则调用 init_task_state
-        // 这是一个简化的判断，如果组刚被插入，其成员应为空
-        let is_newly_created_group = group_guard.control_center_client.is_none() && group_guard.on_site_mobile_client.is_none();
-        if is_newly_created_group {
-             // 在创建新组时，也应调用 TaskStateManager 初始化任务状态
-            self.task_state_manager.init_task_state(group_id.clone(), task_id.clone()).await;
-            info!(
-                "[ConnectionManager] 新组 '{}' 已创建，并已调用 TaskStateManager::init_task_state。",
-                group_id
-            );
+            return Err(RegisterResponsePayload {
+                success: false,
+                message: Some("不允许以 'Unknown' 角色加入组。".to_string()),
+                assigned_client_id: client_id,
+                effective_group_id: None,
+                effective_role: None,
+            });
         }
 
+        let group_arc_rwlock = self
+            .groups
+            .entry(group_id.clone())
+            .or_insert_with(|| {
+                info!(
+                    "[ConnectionManager] 组 '{}' (任务 '{}') 不存在，将创建新组。",
+                    group_id, task_id_payload // 使用 task_id_payload
+                );
+                Arc::new(RwLock::new(Group::new(group_id.clone(), task_id_payload.clone())))
+            })
+            .value()
+            .clone();
 
-        // 2. 角色冲突检查
+        let mut group = group_arc_rwlock.write().await;
+        info!(
+            "[ConnectionManager] 获取到组 '{}' 的写锁，处理客户端 {} 的加入请求。",
+            group_id, client_id
+        );
+
+        // 修复 E0382 borrow error
+        if group.task_id != task_id_payload { // 使用 task_id_payload
+            warn!(
+                "[ConnectionManager] 客户端 {} 尝试加入组 '{}'，但提供的任务ID '{}'与组内记录的任务ID '{}'不匹配。拒绝请求。",
+                client_id, group_id, task_id_payload, group.task_id // group.task_id 在 drop 前使用，安全
+            );
+            // 在 drop(group) 之前克隆 group.task_id
+            let actual_group_task_id_for_error_msg = group.task_id.clone();
+            
+            drop(group); // 释放写锁
+            
+            if let Some(entry) = self.groups.get(&group_id) {
+                let temp_group_guard = entry.value().read().await;
+                if temp_group_guard.control_center_client.is_none() && temp_group_guard.on_site_mobile_client.is_none() {
+                    info!("[ConnectionManager] 由于任务ID不匹配且组 '{}' 为空，将移除此临时创建的组。", group_id);
+                    drop(temp_group_guard); // 释放读锁
+                    self.groups.remove(&group_id);
+                    // 注释掉对 remove_task_state 的调用
+                    /* 
+                    if let Err(e) = self.task_state_manager.remove_task_state(&group_id).await {
+                         error!("[ConnectionManager] 清理临时组 '{}' 的任务状态失败: {:?}", group_id, e);
+                    }
+                    */
+                    info!("[ConnectionManager] 对组 '{}' (因task_id不匹配创建的临时组) 的 remove_task_state 调用已暂时注释。", group_id);
+                }
+            }
+
+            return Err(RegisterResponsePayload {
+                success: false,
+                message: Some(format!(
+                    "任务ID '{}' 与组内记录的任务ID '{}' 不匹配。",
+                    task_id_payload, actual_group_task_id_for_error_msg // 使用克隆后的值
+                )),
+                assigned_client_id: client_id,
+                effective_group_id: None,
+                effective_role: None,
+            });
+        }
+
         match requested_role {
             ClientRole::ControlCenter => {
-                if let Some(existing_cc) = &group_guard.control_center_client {
+                if let Some(existing_cc) = &group.control_center_client {
                     if existing_cc.client_id != client_id {
                         warn!(
                             "[ConnectionManager] 角色冲突：客户端 {} 尝试以 ControlCenter 加入组 '{}'，但该组已存在 ControlCenter (ID: {}).",
@@ -234,19 +400,16 @@ impl ConnectionManager {
                             effective_group_id: None,
                             effective_role: None,
                         });
+                    } else {
+                        info!("[ConnectionManager] 客户端 {} (ControlCenter) 已在组 '{}' 中，重新确认角色。", client_id, group_id);
                     }
-                    // 如果是同一个客户端重复注册（理论上不应发生，因为注册是连接后的第一步），则允许通过
-                    info!(
-                        "[ConnectionManager] 客户端 {} (ControlCenter) 重新确认在组 '{}' 中的身份。",
-                        client_id, group_id
-                    );
                 }
             }
             ClientRole::OnSiteMobile => {
-                if let Some(existing_osm) = &group_guard.on_site_mobile_client {
+                if let Some(existing_osm) = &group.on_site_mobile_client {
                     if existing_osm.client_id != client_id {
                         warn!(
-                            "[ConnectionManager] 角色冲突：客户端 {} 尝试以 OnSiteMobile 加入组 '{}'，但该组已存在现场移动端 (ID: {}).",
+                            "[ConnectionManager] 角色冲突：客户端 {} 尝试以 OnSiteMobile 加入组 '{}'，但该组已存在 OnSiteMobile (ID: {}).",
                             client_id, group_id, existing_osm.client_id
                         );
                         return Err(RegisterResponsePayload {
@@ -256,82 +419,180 @@ impl ConnectionManager {
                             effective_group_id: None,
                             effective_role: None,
                         });
+                    } else {
+                         info!("[ConnectionManager] 客户端 {} (OnSiteMobile) 已在组 '{}' 中，重新确认角色。", client_id, group_id);
                     }
-                    info!(
-                        "[ConnectionManager] 客户端 {} (OnSiteMobile) 重新确认在组 '{}' 中的身份。",
-                        client_id, group_id
-                    );
                 }
             }
-            ClientRole::Unknown => {
-                warn!(
-                    "[ConnectionManager] 客户端 {} 尝试以 Unknown 角色加入组 '{}'。拒绝请求。",
-                    client_id, group_id
-                );
-                return Err(RegisterResponsePayload {
-                    success: false,
-                    message: Some("不允许以 'Unknown' 角色加入组。".to_string()),
-                    assigned_client_id: client_id,
-                    effective_group_id: None,
-                    effective_role: None,
-                });
-            }
+            ClientRole::Unknown => { /* 已在前面处理 */ }
         }
 
-        // 3. 更新客户端会话状态
+        let is_newly_effective_group = group.control_center_client.is_none() && group.on_site_mobile_client.is_none();
+        if is_newly_effective_group { 
+             info!(
+                "[ConnectionManager] 组 '{}' (任务 '{}') 是新创建或首次有效化，将调用 TaskStateManager::init_task_state。",
+                group.group_id, group.task_id
+            );
+            // init_task_state 不返回 Result，直接调用
+            self.task_state_manager
+                .init_task_state(group.group_id.clone(), group.task_id.clone())
+                .await;
+            info!(
+                 "[ConnectionManager] 已尝试为组 '{}' 调用 TaskStateManager::init_task_state。",
+                 group.group_id
+            );
+        }
+
         {
             let mut role_guard = client_session.role.write().await;
             *role_guard = requested_role.clone();
             let mut group_id_guard = client_session.group_id.write().await;
             *group_id_guard = Some(group_id.clone());
+            info!(
+                "[ConnectionManager] 客户端 {} 的会话状态已更新：角色 -> {:?}，组ID -> {}",
+                client_id, requested_role, group_id
+            );
         }
-        info!(
-            "[ConnectionManager] 客户端 {} 的会话状态已更新：角色 -> {:?}，组ID -> {}",
-            client_id, requested_role, group_id
-        );
 
-        // 4. 更新组内成员信息 (在组的写锁 `group_guard` 内)
+        let mut existing_partner_session: Option<Arc<ClientSession>> = None;
         match requested_role {
             ClientRole::ControlCenter => {
-                group_guard.control_center_client = Some(client_session.clone());
+                existing_partner_session = group.on_site_mobile_client.clone();
+                group.control_center_client = Some(client_session.clone());
             }
             ClientRole::OnSiteMobile => {
-                group_guard.on_site_mobile_client = Some(client_session.clone());
+                existing_partner_session = group.control_center_client.clone();
+                group.on_site_mobile_client = Some(client_session.clone());
             }
-            ClientRole::Unknown => { /* 已在前面处理，此处不会到达 */ }
+            ClientRole::Unknown => { /* 不应发生 */ }
         }
         info!(
             "[ConnectionManager] 组 '{}' 的成员信息已更新，客户端 {} ({:?}) 已加入。",
             group_id, client_id, requested_role
         );
 
-        // 5. P3.1.3: 此处将添加通知伙伴上线的逻辑。
-        // (暂时先不实现，以免引入过多复杂性)
+        if let Some(partner_session) = &existing_partner_session {
+            info!(
+                "[ConnectionManager] 检测到组 '{}' 中存在伙伴 (ID: {}, Role: {:?})，准备通知其新成员 {} (Role: {:?}) 已上线。",
+                group_id, partner_session.client_id, partner_session.role.read().await.clone(), client_id, requested_role
+            );
+            let payload_to_partner = PartnerStatusPayload {
+                partner_role: requested_role.clone(),
+                partner_client_id: client_id,
+                is_online: true,
+                group_id: group_id.clone(),
+            };
+            match serde_json::to_string(&payload_to_partner) {
+                Ok(json_payload) => {
+                    let ws_msg_result = WsMessage::new(
+                        PARTNER_STATUS_UPDATE_MESSAGE_TYPE.to_string(),
+                        &json_payload,
+                    );
+                    match ws_msg_result {
+                        Ok(ws_msg) => {
+                            if let Err(e) = partner_session.sender.send(ws_msg).await {
+                                error!(
+                                    "[ConnectionManager] 发送新成员上线通知给伙伴客户端 {} 失败: {:?}. 伙伴可能已断开。",
+                                    partner_session.client_id, e
+                                );
+                            } else {
+                                info!(
+                                    "[ConnectionManager] 已成功发送新成员上线通知 (客户端 {} 上线) 给伙伴客户端 {}.",
+                                    client_id, partner_session.client_id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "[ConnectionManager] 创建 PartnerStatusPayload (新成员上线通知) WsMessage 失败: {:?}",
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[ConnectionManager] Failed to serialize PartnerStatusPayload (new member online notification) for group '{}': {}", group_id, e);
+                }
+            }
+        } else {
+            info!("[ConnectionManager] 客户端 {} ({:?}) 加入组 '{}' 时，组内尚无伙伴。", client_id, requested_role, group_id);
+        }
 
-        // 6. 记录成功加入日志已在各处分散记录
+        if let Some(partner_already_in_group) = &existing_partner_session {
+            let partner_role_in_group = partner_already_in_group.role.read().await.clone();
+             info!(
+                "[ConnectionManager] 准备通知新加入的客户端 {} (Role: {:?}) 关于其伙伴 (ID: {}, Role: {:?}) 的在线状态。",
+                client_id, requested_role, partner_already_in_group.client_id, partner_role_in_group
+            );
+            let payload_to_current_client = PartnerStatusPayload {
+                partner_role: partner_role_in_group,
+                partner_client_id: partner_already_in_group.client_id,
+                is_online: true,
+                group_id: group_id.clone(),
+            };
+            match serde_json::to_string(&payload_to_current_client) {
+                Ok(json_payload) => {
+                    let ws_msg_result = WsMessage::new(
+                        PARTNER_STATUS_UPDATE_MESSAGE_TYPE.to_string(),
+                        &json_payload,
+                    );
+                    match ws_msg_result {
+                        Ok(ws_msg) => {
+                            if let Err(e) = client_session.sender.send(ws_msg).await {
+                                error!(
+                                    "[ConnectionManager] 发送伙伴在线状态通知给当前客户端 {} 失败: {:?}.",
+                                    client_id, e
+                                );
+                            } else {
+                                 info!(
+                                    "[ConnectionManager] 已成功发送伙伴在线状态通知给当前客户端 {}.",
+                                    client_id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "[ConnectionManager] 创建 PartnerStatusPayload (partner online status notification) WsMessage 失败: {:?}",
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[ConnectionManager] Failed to serialize PartnerStatusPayload (partner online status notification) for group '{}': {}", group_id, e);
+                }
+            }
+        }
 
-        // 7. 准备并返回成功的 RegisterResponsePayload
-        let success_response = RegisterResponsePayload {
-            success: true,
-            message: Some(format!("已成功加入组 '{}'。", group_id)),
-            assigned_client_id: client_id,
-            effective_group_id: Some(group_id.clone()),
-            effective_role: Some(requested_role.clone()),
-        };
-
+        let success_msg = format!("已成功加入组 '{}'。", group_id);
         info!(
-            "[ConnectionManager] 客户端 {} 成功加入组 '{}'。响应: {:?}",
-            client_id, group_id, success_response
+            "[ConnectionManager] 客户端 {} 成功加入组 '{}'。响应: success=true, message='{}'",
+            client_id, group_id, success_msg
         );
-        Ok(success_response)
+
+        Ok(RegisterResponsePayload {
+            success: true,
+            message: Some(success_msg),
+            assigned_client_id: client_id,
+            effective_group_id: Some(group_id),
+            effective_role: Some(requested_role),
+        })
+    }
+
+    /// 获取当前所有活动客户端会话的快照。
+    /// 此方法用于内部监控，如心跳检查。
+    pub fn get_all_client_sessions(&self) -> Vec<Arc<ClientSession>> {
+        self.clients.iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     pub fn get_client_count(&self) -> usize {
         self.clients.len()
     }
-
-    // 用于测试或调试，获取一个组的只读访问权限
-    #[allow(dead_code)] // 暂时允许未使用，因为主要用于测试或调试
+    
+    // 根据用户提供的版本，此方法存在，但可能未使用或用于测试
+    #[allow(dead_code)]
     pub async fn get_group(&self, group_id: &str) -> Option<tokio::sync::OwnedRwLockReadGuard<Group>> {
         if let Some(group_entry) = self.groups.get(group_id) {
             let group_arc_rwlock = group_entry.value().clone();
@@ -344,9 +605,7 @@ impl ConnectionManager {
 
 impl Default for ConnectionManager {
     fn default() -> Self {
-        // Default 需要一个 TaskStateManager, 这使得 Default 实现有点复杂
-        // 通常，我们会移除 Default，或者让 TaskStateManager 也有 Default
-        // 既然 TaskStateManager 已有 Default, 我们可以这样:
+        info!("[ConnectionManager] Creating default instance.");
         Self::new(Arc::new(TaskStateManager::default()))
     }
 } 

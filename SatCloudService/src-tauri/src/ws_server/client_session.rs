@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use common_models::enums::ClientRole;
 use rust_websocket_utils::message::WsMessage; // 修改这里
+use std::sync::atomic::AtomicBool;
 
 /// 代表一个已连接的 WebSocket 客户端会话
 #[derive(Debug)]
@@ -23,11 +24,17 @@ pub struct ClientSession {
     pub last_seen: Arc<RwLock<DateTime<Utc>>>,
     /// 客户端所属的组ID (为P3.1.1准备)
     pub group_id: Arc<RwLock<Option<String>>>,
+    pub connection_should_close: Arc<AtomicBool>,
 }
 
 impl ClientSession {
     /// 创建一个新的 ClientSession 实例
-    pub fn new(client_id: Uuid, sender: mpsc::Sender<WsMessage>, addr: SocketAddr) -> Self {
+    pub fn new(
+        addr: SocketAddr,
+        sender: mpsc::Sender<WsMessage>,
+        connection_should_close: Arc<AtomicBool>,
+    ) -> Self {
+        let client_id = Uuid::new_v4();
         let now = Utc::now();
         Self {
             client_id,
@@ -37,6 +44,7 @@ impl ClientSession {
             creation_time: now,
             last_seen: Arc::new(RwLock::new(now)),
             group_id: Arc::new(RwLock::new(None)),
+            connection_should_close,
         }
     }
 } 

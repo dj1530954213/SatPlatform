@@ -1,8 +1,18 @@
 use tauri::Manager; // 重新添加，以备后用或确认是否确实无关
+use log::{error, info, LevelFilter}; // 引入 LevelFilter
+use sat_cloud_service::ws_server::service::WsService; // 引入 WsService
+use sat_cloud_service::ws_server::connection_manager::ConnectionManager; // 引入 ConnectionManager
+use sat_cloud_service::ws_server::task_state_manager::TaskStateManager; // P3.1.2: 引入 TaskStateManager
+use sat_cloud_service::ws_server::heartbeat_monitor::HeartbeatMonitor; // P3.2.1: 引入 HeartbeatMonitor
+use std::sync::Arc;
+use std::time::Duration; // P3.2.1: 引入 Duration
 
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 // 在 Windows 发行版中阻止额外的控制台窗口，请勿删除!!
-#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 // 进一步了解 Tauri 命令: https://tauri.app/v1/guides/features/command
@@ -15,39 +25,67 @@ mod config;
 mod ws_server;
 
 fn main() {
-    // 尽早初始化日志记录器。
-    // 建议在 Tauri 构建器设置之前，或者在 setup 闭包的开始处执行此操作。
-                         // 根据 P1.1.1 的要求移至 setup 闭包中，以便在需要时访问 app_handle 进行配置。
+    // 初始化日志记录器 (env_logger)
+    env_logger::Builder::new()
+        .filter_level(LevelFilter::Info) // 默认设置为 Info 级别
+        .format_timestamp_millis()       // 添加毫秒级时间戳
+        .init();
+    info!("日志系统已初始化。");
 
+    // 启动 Tauri 应用
     tauri::Builder::default()
         .setup(|app| {
-            // Initialize logger
-            // 初始化日志记录器
-            // Ensure this is called only once. 
-            // 确保此操作仅被调用一次。
-            // Using `try_init` is safer if there's any chance of multiple initializations.
-            // 如果有可能发生多次初始化，使用 `try_init` 会更安全。
-            if let Err(e) = env_logger::Builder::from_env(
-                env_logger::Env::default().default_filter_or("debug,app=debug") // 默认 debug, app 也是 debug
-            ).try_init() {
-                // eprintln! is used here because the logger might not be initialized yet.
-                // 此处使用 eprintln! 是因为日志记录器此时可能尚未初始化。
-                eprintln!("初始化 env_logger 失败: {}", e);
-            }
-            log::info!("日志系统已初始化。");
+            info!("Tauri App Setup: 初始化开始");
 
-            let handle = app.handle().clone(); // 克隆应用句柄以传递给异步任务
-            // 恢复使用 tauri::async_runtime::spawn
+            // 使用 app.handle() 传递给 init_config
+            sat_cloud_service::config::init_config(&app.handle()); 
+            let app_config = sat_cloud_service::config::get_config();
+            info!("[MainSetup] 应用配置已加载: {:?}", app_config);
+
+            // 创建 TaskStateManager (P3.1.2)
+            let task_state_manager = Arc::new(TaskStateManager::new());
+            info!("[MainSetup] TaskStateManager (骨架) 已创建。");
+
+            // 创建 ConnectionManager 并注入 TaskStateManager (P1.2.1 & P3.1.2)
+            let connection_manager = Arc::new(ConnectionManager::new(task_state_manager.clone()));
+            info!("[MainSetup] ConnectionManager 已创建并注入 TaskStateManager。");
+
+            // 将 ConnectionManager 放入 Tauri 的 State 中，以便 Tauri 命令可以访问 (P1.2.1)
+            app.manage(connection_manager.clone()); 
+            info!("[MainSetup] ConnectionManager 已放入 Tauri State。");
+
+            let app_handle_for_ws = app.handle().clone(); // Clone AppHandle for ws_service
+            let ws_service_instance = WsService::new(app_config.websocket.clone(), connection_manager.clone());
+            
+            // 使用 tauri::async_runtime::spawn
             tauri::async_runtime::spawn(async move {
-                log::info!("正在创建并启动 WebSocket 服务任务...");
-                if let Err(e) = ws_server::service::start_ws_server(handle).await {
-                    log::error!("WebSocket 服务启动失败或在运行过程中遇到错误: {:?}", e);
+                info!("正在创建并启动 WebSocket 服务任务...");
+                if let Err(e) = ws_service_instance.start().await { 
+                    error!("启动 WebSocket 服务失败: {}", e);
                 }
             });
+            info!("[MainSetup] WebSocket 服务启动任务已异步派生。");
+
+            let heartbeat_check_interval = Duration::from_secs(app_config.websocket.heartbeat_check_interval_seconds);
+            let client_timeout = Duration::from_secs(app_config.websocket.client_timeout_seconds);
+            
+            let app_handle_for_heartbeat = app.handle().clone(); // Clone AppHandle for heartbeat_monitor (if needed, though not directly used by it currently)
+            let heartbeat_monitor = HeartbeatMonitor::new(
+                connection_manager.clone(),
+                client_timeout,
+                heartbeat_check_interval,
+            );
+            // 使用 tauri::async_runtime::spawn
+            tauri::async_runtime::spawn(async move {
+                info!("[MainSetup] 启动 HeartbeatMonitor 任务...");
+                heartbeat_monitor.run().await;
+            });
+            info!("[MainSetup] HeartbeatMonitor 启动任务已异步派生。");
+
+            info!("Tauri App Setup: 初始化完成");
             Ok(())
         })
-        // .plugin(tauri_plugin_shell::init()) // Removed this line / 此行已移除 (之前用于 shell 插件，现已解决相关编译错误)
-        .invoke_handler(tauri::generate_handler![greet])
-        .run(tauri::generate_context!())
+        .invoke_handler(tauri::generate_handler![]) // 确保 invoke_handler 存在，即使为空
+        .run(tauri::generate_context!()) 
         .expect("运行 Tauri 应用时发生错误");
 }
