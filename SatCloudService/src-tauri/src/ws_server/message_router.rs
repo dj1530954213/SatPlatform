@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use anyhow::Result; // 使用 anyhow 作为错误类型，简化错误处理
-use log::{debug, warn, error}; // 使用 log crate 进行日志记录
+use log::{debug, warn, error, info}; // 使用 log crate 进行日志记录
 use chrono::Utc; // 用于获取当前时间
 
 use common_models::ws_payloads::{
@@ -13,9 +13,12 @@ use common_models::ws_payloads::{
     ErrorResponsePayload,
     PingPayload, // P1.4.1 新增
     PongPayload, // P1.4.1 新增
+    RegisterPayload, // P3.1.2 新增
+    RegisterResponsePayload, // P3.1.2 新增
 };
 use rust_websocket_utils::message::WsMessage; // WsMessage 结构体
 use super::client_session::ClientSession; // ClientSession 结构体
+use super::connection_manager::ConnectionManager; // P3.1.2 新增
 
 /// 异步处理从客户端接收到的单个 WebSocket 消息。
 ///
@@ -24,6 +27,7 @@ use super::client_session::ClientSession; // ClientSession 结构体
 /// # 参数
 /// * `client_session`: 发送此消息的客户端会话的共享引用。
 /// * `message`: 从客户端接收到的 `WsMessage`。
+/// * `connection_manager`: 对 `ConnectionManager` 的共享引用，用于访问组管理等功能。
 ///
 /// # 返回
 /// * `Result<(), anyhow::Error>`: 如果处理成功则返回 `Ok(())`，否则返回包含错误的 `Err`。
@@ -32,6 +36,7 @@ use super::client_session::ClientSession; // ClientSession 结构体
 pub async fn handle_message(
     client_session: Arc<ClientSession>,
     message: WsMessage,
+    connection_manager: Arc<ConnectionManager>, // P3.1.2: 添加 ConnectionManager 参数
 ) -> Result<(), anyhow::Error> {
     // 1. 更新客户端的 last_seen 时间戳
     let now = Utc::now();
@@ -150,6 +155,93 @@ pub async fn handle_message(
             }
         }
         // --- P1.4.1 结束 ---
+        // --- P3.1.2: 处理 Register 消息 ---
+        ws_payloads::REGISTER_MESSAGE_TYPE => {
+            info!(
+                "客户端 {}: 收到 Register 请求。 payload: {}",
+                client_session.client_id, message.payload
+            );
+            match serde_json::from_str::<RegisterPayload>(&message.payload) {
+                Ok(parsed_payload) => {
+                    debug!(
+                        "客户端 {}: RegisterPayload 解析成功: {:?}",
+                        client_session.client_id, parsed_payload
+                    );
+
+                    // 调用 ConnectionManager 处理加入组的逻辑
+                    let response_payload = connection_manager
+                        .join_group(client_session.clone(), parsed_payload)
+                        .await;
+                    
+                    // join_group 返回 Result<RegisterResponsePayload, RegisterResponsePayload>
+                    // 我们需要将其统一为 RegisterResponsePayload 来发送
+                    let final_response_payload = match response_payload {
+                        Ok(success_resp) => success_resp,
+                        Err(failure_resp) => failure_resp, // 失败时也是 RegisterResponsePayload
+                    };
+
+                    match WsMessage::new(
+                        ws_payloads::REGISTER_RESPONSE_MESSAGE_TYPE.to_string(),
+                        &final_response_payload,
+                    ) {
+                        Ok(response_ws_msg) => {
+                            if let Err(e) = client_session.sender.send(response_ws_msg).await {
+                                error!(
+                                    "客户端 {}: 发送 RegisterResponse 失败: {}",
+                                    client_session.client_id, e
+                                );
+                            } else {
+                                info!(
+                                    "客户端 {}: RegisterResponse 已发送: {:?}",
+                                    client_session.client_id, final_response_payload
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "客户端 {}: 创建 RegisterResponse WsMessage 失败: {}. Payload: {:?}",
+                                client_session.client_id, e, final_response_payload
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // RegisterPayload 反序列化失败
+                    warn!(
+                        "客户端 {}: 解析 RegisterPayload 失败: {}。原始 payload: '{}'",
+                        client_session.client_id, e, message.payload
+                    );
+                    // 发送表示请求无效的 RegisterResponsePayload
+                    let error_response = RegisterResponsePayload {
+                        success: false,
+                        message: Some(format!("无效的 RegisterPayload 格式: {}", e)),
+                        assigned_client_id: client_session.client_id, // 仍然告知客户端其ID
+                        effective_group_id: None,
+                        effective_role: None,
+                    };
+                    match WsMessage::new(
+                        ws_payloads::REGISTER_RESPONSE_MESSAGE_TYPE.to_string(),
+                        &error_response,
+                    ) {
+                        Ok(response_ws_msg) => {
+                            if let Err(send_err) = client_session.sender.send(response_ws_msg).await {
+                                error!(
+                                    "客户端 {}: 发送无效 RegisterPayload 的 RegisterResponse 失败: {}",
+                                    client_session.client_id, send_err
+                                );
+                            }
+                        }
+                        Err(create_err) => {
+                             error!(
+                                "客户端 {}: 创建无效 RegisterPayload 的 RegisterResponse WsMessage 失败: {}. Payload: {:?}",
+                                client_session.client_id, create_err, error_response
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // --- P3.1.2 结束 ---
         _ => {
             // 处理未知消息类型
             warn!(

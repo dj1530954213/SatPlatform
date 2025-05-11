@@ -8,6 +8,7 @@ use crate::config::WsConfig;
 // 旧: use crate::ws_server::client_session::ClientSession; // 确保 ClientSession 已导入 -- 警告：未使用
 use crate::ws_server::connection_manager::ConnectionManager;
 use crate::ws_server::message_router; // 导入 message_router 模块
+use crate::ws_server::task_state_manager::TaskStateManager; // P3.1.2 新增
 use anyhow::{Context, Result}; // 确保 Context 被导入
 use futures_util::stream::SplitStream;
 use log::{debug, error, info, warn};
@@ -44,8 +45,13 @@ pub async fn start_ws_server(app_handle: AppHandle) -> Result<(), anyhow::Error>
         ws_config.host, ws_config.port
     );
 
-    // 创建 ConnectionManager
-    let connection_manager = Arc::new(ConnectionManager::new());
+    // P3.1.2: 创建 TaskStateManager
+    let task_state_manager = Arc::new(TaskStateManager::new());
+    info!("[WebSocket服务] TaskStateManager (骨架) 已创建。");
+
+    // P3.1.2: 修改 ConnectionManager 创建，传入 task_state_manager
+    let connection_manager = Arc::new(ConnectionManager::new(Arc::clone(&task_state_manager)));
+    info!("[WebSocket服务] ConnectionManager 已创建并注入 TaskStateManager。");
 
     // 定义 on_new_connection 回调
     // 此回调会在每个新的 WebSocket 连接成功建立后被调用。
@@ -107,6 +113,8 @@ pub async fn start_ws_server(app_handle: AppHandle) -> Result<(), anyhow::Error>
                 
                 // 4. 主循环：接收来自客户端的消息，并交由 MessageRouter 处理
                 let client_session_clone_for_router = Arc::clone(&client_session);
+                // P3.1.2: 克隆 ConnectionManager 以传递给 handle_message
+                let connection_manager_for_router = Arc::clone(&connection_manager_clone);
                 loop {
                     match receive_message(&mut ws_receiver).await {
                         Some(Ok(ws_msg)) => {
@@ -114,6 +122,7 @@ pub async fn start_ws_server(app_handle: AppHandle) -> Result<(), anyhow::Error>
                             if let Err(e) = message_router::handle_message(
                                 Arc::clone(&client_session_clone_for_router),
                                 ws_msg,
+                                Arc::clone(&connection_manager_for_router), // P3.1.2: 传递 CM
                             )
                             .await
                             {
@@ -175,19 +184,19 @@ pub async fn start_ws_server(app_handle: AppHandle) -> Result<(), anyhow::Error>
                     "[WebSocket服务] SessionID {}: 连接处理任务结束。正在从 ConnectionManager 移除会话...",
                     client_session.client_id
                 );
-                if let Some(removed_session) = connection_manager_clone.remove_client(&client_session.client_id).await {
-                    info!(
-                        "[WebSocket服务] 会话 {} (Addr: {:?}, Role: {:?}) 已成功移除。",
-                        removed_session.client_id,
-                        removed_session.addr, // 仍为占位符
-                        *removed_session.role.read().await
-                    );
-                } else {
-                    warn!(
-                        "[WebSocket服务] 尝试移除会话 {} 时未在 ConnectionManager 中找到。",
-                        client_session.client_id
-                    );
-                }
+                // 在移除客户端前，先获取其角色和组ID的最新状态，用于日志记录
+                let role_before_remove = client_session.role.read().await.clone();
+                let group_id_before_remove = client_session.group_id.read().await.clone();
+
+                connection_manager_clone.remove_client(&client_session.client_id).await;
+                // 日志记录现在将依赖于 remove_client 内部的日志，因为它能访问到最新的组信息。
+                info!(
+                    "[WebSocket服务] 会话 {} (Addr: {:?}, Role at disconnect: {:?}, Group at disconnect: {:?}) 的清理流程已调用 ConnectionManager::remove_client。",
+                    client_session.client_id,
+                    client_session.addr,
+                    role_before_remove,
+                    group_id_before_remove.as_deref().unwrap_or("N/A")
+                );
                 // 发送任务的 rx_from_client_session 会因为其对应的 tx (在 ClientSession 中) 被 drop 而结束。
                 // 或者可以显式地 drop/close client_session.sender 中的 tx，但这需要 ClientSession 内部做更改。
                 // 这里依赖 ClientSession 被 drop 时，其内部的 mpsc::Sender 被 drop。
