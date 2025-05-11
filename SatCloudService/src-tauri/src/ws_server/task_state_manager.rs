@@ -1,67 +1,338 @@
-//! 负责管理所有活动调试任务的权威状态。
-//! (P3.1.2 阶段仅为骨架，P3.3.1 将详细实现)
+//! 任务状态管理器模块。
+//!
+//! 本模块的核心职责是集中管理和维护所有活动调试任务的权威状态数据。
+//! 服务端的 `TaskStateManager` (任务状态管理器) 持有每个进行中调试任务的完整、最新的状态模型
+//! (例如，一个 `TaskDebugState` (任务调试状态) 结构体实例，其中包含了预检项列表、测试步骤、
+//! 联锁条件等所有相关信息及其当前状态)。
+//!
+//! (重要提示：P3.1.2 开发阶段，本模块 (`task_state_manager.rs`) 仅为一个骨架 (skeleton) 实现。
+//!  它主要定义了 `TaskStateManager` (任务状态管理器) 结构体和一些核心方法的基本签名，
+//!  但这些方法内部的逻辑当前为空，或者仅包含日志记录语句。详细和完整的状态管理功能，
+//!  包括引入并发安全的数据结构来实际存储任务状态 (例如，使用 `DashMap` 存储多个 `TaskDebugState` (任务调试状态) 实例)，
+//!  以及实现完整的状态创建、更新、查询和清理逻辑，将在 P3.3.1 及后续的开发阶段进行详细设计和编码实现。)
+//!
+//! # 主要功能 (P3.3.1 及后续阶段的规划)
+//! - **状态存储**: 使用高效且线程安全的数据结构 (例如，一个 `DashMap<GroupIdString, Arc<RwLock<TaskDebugState>>>`)
+//!   来存储每个活动调试任务 (通常以其唯一的 `GroupIdString` (组ID字符串) 作为键) 的详细状态 (`TaskDebugState` - 任务调试状态)。
+//!   这里的 `Arc<RwLock<...>>` 结构用于确保对单个 `TaskDebugState` (任务调试状态) 的并发访问既安全又高效。
+//! - **状态初始化**: 当一个新的调试任务组通过 `ConnectionManager::join_group` (连接管理器的加入组方法) 成功创建后，
+//!   应调用本管理器的 `init_task_state` (初始化任务状态) 方法。此方法将负责为这个新组关联的调试任务加载其初始的 `TaskDebugState` (任务调试状态)
+//!   (可能从数据库、配置文件或其他数据源获取任务模板)，或创建一个全新的默认状态实例。
+//! - **状态更新**: 提供一系列方法 (例如，一个通用的 `update_task_debug_state` (更新任务调试状态) 方法，或针对特定操作的更具体方法)，
+//!   允许 `MessageRouter` (消息路由器) (在处理来自客户端的、与特定业务逻辑相关的 WebSocket 消息时)
+//!   或其他内部服务来安全地修改某个特定任务的状态。这些更新方法必须确保操作的原子性和数据的一致性。
+//! - **状态查询与快照**: 提供方法 (例如 `get_task_state_snapshot` - 获取任务状态快照) 来获取某个任务当前状态的一个只读副本或快照。
+//!   这对于向客户端同步完整的任务状态 (例如，当客户端刚加入一个已在进行的任务组时)，或供其他服务端模块参考任务数据时非常有用。
+//! - **状态清理**: 当一个调试任务正常结束，或其相关的客户端组被解散 (例如，所有客户端都已断开连接) 时，
+//!   本管理器需要负责从其内部存储中移除对应的任务状态，以释放占用的系统资源。
 
-use log::info;
-// use std::sync::Arc; // Arc 未在此骨架实现中使用，移除
+use log::{info, debug}; // 引入标准日志宏 (info, debug) 用于在程序运行时记录操作信息和调试状态。
+// P3.3.1 开发阶段将取消以下注释并引入实际依赖：
+// use std::sync::Arc; // `Arc` (原子引用计数) 将用于安全地共享 TaskStateManager 实例以及单个 TaskDebugState 实例的所有权。
+// use dashmap::DashMap; // `DashMap` 是一个高性能的并发哈希映射库，计划用于存储 `group_id` 到 `TaskDebugState` 的映射。
+// use tokio::sync::RwLock; // Tokio 提供的异步读写锁 (`RwLock`)，将用于保护对单个 `TaskDebugState` 实例内部数据的并发读写访问，确保数据一致性。
+// use common_models::task_debug_state::TaskDebugState; // 从 `common_models` (公共模型) crate 引入任务调试状态的详细结构体定义。
+// use common_models::enums::ClientRole; // 从 `common_models` (公共模型) crate 引入客户端角色枚举，在实现 P3.3.1 的状态更新方法时可能会根据角色进行权限检查或逻辑分支。
 
-/// TaskStateManager 结构体的骨架定义。
+/// `TaskStateManager` (任务状态管理器) 结构体的定义 (当前为P3.1.2阶段的骨架实现)。
 /// 
-/// 在 P3.3.1 中，这里会包含用于存储 TaskDebugState 的线程安全集合。
-#[derive(Debug, Clone)] // Clone 是为了方便在多处共享 Arc<TaskStateManager>
+/// 在 P3.3.1 及后续的完整功能实现阶段，此结构体将包含一个核心字段，用于存储和管理多个活动调试任务的
+/// `TaskDebugState` (任务调试状态) 实例。这个字段通常会是一个被 `Arc` (原子引用计数) 包裹的并发安全集合，
+/// 例如 `Arc<DashMap<String, Arc<RwLock<TaskDebugState>>>>`。
+/// 具体解释如下：
+/// - 外层的 `Arc` 使得 `TaskStateManager` (任务状态管理器) 实例本身可以被安全地共享给多个需要访问它的地方
+///   (例如，可以作为 Tauri 应用的托管状态 (`tauri::State<TaskStateManager>`)，或者被其他服务持有其共享引用)。
+/// - `DashMap<String, ...>` 提供了一个高性能的、线程安全的哈希映射实现。它的键 (Key) 通常是 `group_id` (字符串类型)，
+///   这个 `group_id` 唯一地标识了一个正在进行的调试任务会话或客户端组。
+/// - `DashMap` 的值 (Value) 是 `Arc<RwLock<TaskDebugState>>`：
+///   - 这里的内层 `Arc` 允许对单个任务的 `TaskDebugState` (任务调试状态) 的引用被安全地克隆并分发给多个
+///     可能并发处理此任务状态的不同代码路径 (例如，多个处理同一任务组消息的请求)。
+///   - `RwLock<TaskDebugState>` (异步读写锁) 则用于保护 `TaskDebugState` (任务调试状态) 结构体内部的实际数据。
+///     它允许多个并发的读取者，但在有写入者时会确保独占访问，从而保证了任务状态数据在并发修改时的
+///     一致性和完整性。
+#[derive(Debug, Clone)] // 自动派生 `Debug` trait，使得 `TaskStateManager` 实例可以使用 `{:?}` 格式化操作符进行打印，便于调试。
+                         // 自动派生 `Clone` trait。对于当前的骨架实现 (没有内部复杂字段)，这个 `Clone` 是简单的。
+                         // 在 P3.3.1 的完整实现中，如果 `TaskStateManager` 内部持有一个如 `active_task_states: Arc<DashMap<...>>` 这样的字段，
+                         // 那么 `TaskStateManager::clone()` 操作实际上只会克隆这个 `Arc` (原子引用计数指针)，
+                         // 这是一种浅拷贝，只增加引用计数，而不会复制底层的 `DashMap` 数据。这正是共享状态管理所期望的行为。
 pub struct TaskStateManager {
-    // 内部状态将在 P3.3.1 中定义，例如：
+    // P3.3.1 开发阶段将在此处定义实际的内部状态存储字段。例如：
+    // /**
+    //  * 存储所有当前活动的调试任务状态的并发安全哈希映射。
+    //  *
+    //  * - **键 (Key)**: `String` 类型，代表 `group_id` (组ID)。这个ID唯一地标识了一个客户端调试任务组/会话。
+    //  * - **值 (Value)**: `Arc<RwLock<TaskDebugState>>` 类型。这是一个对特定任务的 `TaskDebugState` (任务调试状态) 实例的
+    //  *   共享的、且内部受读写锁保护的引用。
+    //  */
     // active_task_states: Arc<DashMap<String, Arc<RwLock<TaskDebugState>>>>,
 }
 
 impl TaskStateManager {
-    /// 创建一个新的 `TaskStateManager` 实例。
+    /// 创建一个新的 `TaskStateManager` (任务状态管理器) 实例 (当前为P3.1.2阶段的骨架实现)。
+    /// 
+    /// 在 P3.3.1 阶段的完整功能实现中，此构造函数将负责正确初始化其内部用于存储
+    /// 所有活动任务状态的并发数据结构。例如，它会创建一个新的 `DashMap` 实例，
+    /// 并用 `Arc` (原子引用计数) 将其包装起来，然后存储在 `active_task_states` 字段中。
+    ///
+    /// # 返回值
+    /// 返回一个新创建的 `TaskStateManager` (任务状态管理器) 实例 (在当前骨架实现中，其内部状态为空)。
     pub fn new() -> Self {
-        info!("[TaskStateManager] New instance created (skeleton).");
+        info!("[任务状态管理器] 正在创建一个新的 TaskStateManager (任务状态管理器) 实例。(当前为P3.1.2骨架实现，内部实际状态存储尚未初始化)。");
         Self {
+            // P3.3.1 阶段，这里将进行类似如下的初始化：
             // active_task_states: Arc::new(DashMap::new()),
         }
     }
 
-    /// 初始化或关联任务状态（骨架实现）。
+    /// 初始化或关联特定调试任务的状态 (当前为P3.1.2阶段的骨架实现，主要功能是记录日志)。
     /// 
-    /// 在 P3.3.1 中，此方法会创建或加载指定任务的完整状态。
-    /// 
-    /// # Arguments
-    /// * `group_id` - 与任务关联的组ID。
-    /// * `task_id` - 要初始化的任务的唯一ID。
+    /// 在 P3.3.1 阶段的完整功能实现中，此异步方法 (`async fn`) 将承担以下关键职责：
+    /// 1.  接收一个 `group_id` (组ID，字符串类型) 和一个 `task_id` (任务ID，字符串类型)。
+    ///     `group_id` 通常由 `ConnectionManager` (连接管理器) 在客户端成功加入一个调试组后提供，
+    ///     而 `task_id` 则指定了要初始化的具体任务的类型或标识，可能用于从数据源加载任务模板。
+    /// 2.  检查内部的 `active_task_states` (活动任务状态) 集合 (在P3.3.1中会是 `DashMap`) 
+    ///     中是否已经存在以传入的 `group_id` 为键的任务状态条目。
+    /// 3.  如果该 `group_id` 对应的任务状态尚不存在：
+    ///     a.  则需要根据 `task_id` 来创建或加载一个全新的 `TaskDebugState` (任务调试状态) 实例。
+    ///         这可能涉及到从数据库查询任务模板、从配置文件加载默认设置，或基于 `task_id` 应用某种工厂模式来构造初始状态。
+    ///     b.  将这个新创建的 `TaskDebugState` (任务调试状态) 实例用 `RwLock` (读写锁) 和 `Arc` (原子引用计数) 包装起来，
+    ///         即 `Arc<RwLock<TaskDebugState>>`。
+    ///     c.  然后将这个包装后的共享状态引用插入到 `active_task_states` (活动任务状态) 集合中，
+    ///         使用 `group_id` 作为其键。
+    /// 4.  如果 `group_id` 对应的任务状态已存在，则根据具体的设计决策，可能执行重新初始化逻辑 (如果允许)，
+    ///     或者简单地记录一个警告并返回 (如果一个组的任务状态一旦初始化后不应被覆盖)。
+    /// 5.  在整个过程中，记录详细的日志信息，包括操作的参数、执行的步骤以及结果状态。
+    ///
+    /// # 参数
+    /// * `group_id`: `String` - 唯一标识一个客户端调试任务组或会话的字符串。此 ID 将被用作在内部
+    ///   `active_task_states` (活动任务状态) 集合中存储和检索该任务对应状态的键。
+    /// * `task_id`: `String` - 需要为其初始化状态的原始调试任务的唯一标识符。这个 ID 可能会被用于
+    ///   从某个外部数据源 (如数据库、配置文件) 加载该任务的初始配置、模板数据或默认设置。
     pub async fn init_task_state(&self, group_id: String, task_id: String) {
-        // 仅记录调用，实际状态管理将在 P3.3.1 实现
+        // 当前 (P3.1.2 骨架实现) 仅记录调用信息。实际的状态管理和初始化逻辑将在 P3.3.1 开发阶段实现。
         info!(
-            "[TaskStateManager] (Skeleton) init_task_state called for group_id: '{}', task_id: '{}'",
+            "[任务状态管理器] (P3.1.2 骨架实现) `init_task_state` (初始化任务状态) 方法被调用。传入参数：组ID (group_id) = '{}', 任务ID (task_id) = '{}'. "
+            + "注意：此方法当前仅打印日志，不执行任何实际的任务状态创建或存储操作。",
             group_id, task_id
         );
-        // 在 P3.3.1 中，这里将执行实际的状态创建和存储逻辑。
-        // 例如：
-        // let task_state = TaskDebugState::new(task_id.clone());
-        // self.active_task_states.insert(group_id, Arc::new(RwLock::new(task_state)));
+        debug!(
+            "[任务状态管理器] (P3.1.2 骨架实现细节) 在 P3.3.1 阶段的完整实现中，此处将包含根据 task_id 创建 TaskDebugState (任务调试状态) 实例，"
+            + "并将其包装在 Arc<RwLock<...>> 中，然后以 group_id 为键存入内部的 active_task_states (DashMap) 集合的关键逻辑。"
+        );
+        // --- P3.3.1 阶段的示例性逻辑可能如下 (伪代码，具体实现会更复杂和健壮) ---
+        // info!(
+        //     "[任务状态管理器 P3.3.1] 正在为组ID '{}' (其关联的原始任务ID为 '{}') 初始化或获取任务调试状态...",
+        //     group_id, task_id
+        // );
+        // // 检查该组ID是否已存在于 active_task_states 中，以避免重复初始化或决定如何处理已存在的状态。
+        // if self.active_task_states.contains_key(&group_id) {
+        //     info!(
+        //         "[任务状态管理器 P3.3.1] 组ID '{}' 对应的任务状态已存在于管理器中。根据项目设计决策，可能需要执行重新初始化、更新，或者直接返回现有状态。当前骨架实现：无操作。",
+        //         group_id
+        //     );
+        //     // 示例：如果设计允许，这里可能需要加载现有状态，或者基于新的 task_id (如果不同) 进行某种更新或合并操作。
+        // } else {
+        //     // 示例：假设 TaskDebugState 有一个异步构造函数或工厂方法，可以根据 task_id 从数据源加载初始数据。
+        //     match TaskDebugState::new_from_template_async(&task_id).await { // 假设 new_from_template_async 是异步的
+        //         Ok(new_task_state_instance) => {
+        //             // 将新创建的任务状态实例用读写锁 (RwLock) 和原子引用计数 (Arc) 包装起来，以便于安全地共享和并发修改。
+        //             let shared_and_locked_state = Arc::new(RwLock::new(new_task_state_instance));
+        //             // 将这个包装后的状态引用插入到并发哈希映射 (DashMap) 中，使用 group_id 作为键。
+        //             self.active_task_states.insert(group_id.clone(), shared_and_locked_state);
+        //             info!(
+        //                 "[任务状态管理器 P3.3.1] 已为组ID '{}' (源自任务ID '{}') 成功创建、初始化并存储了新的任务调试状态。",
+        //                 group_id, task_id
+        //             );
+        //         },
+        //         Err(e) => {
+        //             error!(
+        //                 "[任务状态管理器 P3.3.1] 为组ID '{}' (源自任务ID '{}') 创建新的任务调试状态时失败: {}. 状态未被初始化。",
+        //                 group_id, task_id, e
+        //             );
+        //         }
+        //     }
+        // }
+        // --- P3.3.1 阶段示例性逻辑结束 ---
     }
 
-    // remove_task_state, update_state_and_get_updated 等方法将在P3.3.1中添加
+    // --- P3.3.1 及后续阶段计划添加的更多核心方法 (以下为占位符和概念性注释) --- 
+    // (以下方法签名和注释仅为当前阶段的初步设想和示意，P3.3.1 的具体实现会根据详细设计进行调整和完善)
+
+    // /**
+    //  * (P3.3.1 规划) 移除与指定 `group_id` (组ID) 对应的任务调试状态。
+    //  *
+    //  * 当一个调试任务会话结束 (例如，所有相关客户端均已断开连接，并且该组已被 `ConnectionManager` (连接管理器) 清理)，
+    //  * 或者当任务通过业务逻辑明确标记为完成或终止时，应调用此方法。
+    //  * 其目的是从 `active_task_states` (活动任务状态) 集合中移除相应的条目，以释放内存和其他相关资源。
+    //  *
+    //  * # 参数
+    //  * * `group_id`: `&str` - 要移除其任务状态的组的唯一标识符。
+    //  */
+    // pub async fn remove_task_state(&self, group_id: &str) {
+    //     info!("[任务状态管理器 P3.3.1 规划] 接收到移除组ID '{}' 对应任务状态的请求...", group_id);
+    //     // 示例逻辑: self.active_task_states.remove(group_id) 会返回被移除的条目 (Option<(String, Arc<RwLock<TaskDebugState>>) >)
+    //     if let Some((removed_key, _removed_state_arc)) = self.active_task_states.remove(group_id) {
+    //         info!("[任务状态管理器 P3.3.1 规划] 已成功从管理器中移除组ID '{}' ('{}') 的任务调试状态。", group_id, removed_key);
+    //     } else {
+    //         warn!("[任务状态管理器 P3.3.1 规划] 尝试移除组ID '{}' 的任务状态失败：在管理器中未找到该组ID对应的状态条目。可能已被移除或从未初始化。", group_id);
+    //     }
+    // }
+    // 
+    // /**
+    //  * (P3.3.1 规划) 根据客户端发起的一个具体业务操作 (封装在 `action_payload` 中) 来更新指定组 (`group_id`) 的任务状态。
+    //  *
+    //  * 此核心方法预计会被 `MessageRouter` (消息路由器) 在处理来自客户端的、特定于业务逻辑的 WebSocket 消息时调用。
+    //  * 它需要执行以下步骤：
+    //  * 1.  根据 `group_id` 从 `active_task_states` (活动任务状态) 集合中查找到对应的 `Arc<RwLock<TaskDebugState>>`。
+    //  * 2.  异步获取该 `RwLock` (读写锁) 的写锁 (`.write().await`)，以确保对 `TaskDebugState` (任务调试状态) 的独占访问。
+    //  * 3.  (可选但推荐) 根据发起操作的 `client_role` (客户端角色) 进行权限检查，判断该角色是否有权执行此特定操作。
+    //  * 4.  将 `action_payload` (操作负载) 的内容应用到被锁定的 `TaskDebugState` (任务调试状态) 实例上，从而修改其内部数据。
+    //  *     这可能涉及到调用 `TaskDebugState` (任务调试状态) 自身的方法来处理更新逻辑。
+    //  * 5.  (关键) 如果状态确实因为此操作而发生了改变，则此方法应返回更新后的 `TaskDebugState` (任务调试状态) 的一个克隆副本 (快照)。
+    //  *     这个快照随后可以被 `MessageRouter` (消息路由器) 用于向该任务组内的所有伙伴客户端广播状态更新通知。
+    //  *     如果状态未发生变化，或者操作因权限不足等原因未执行，则可以返回 `None`。
+    //  *
+    //  * # 类型参数 `P`
+    //  * `P` 代表一个具体的业务操作负载 (payload) 的类型。例如，它可能是 `UpdatePreCheckItemPayload` (更新预检项负载)、
+    //  * `StartSingleTestStepPayload` (开始单步测试负载) 等等。这个类型 `P` 必须满足以下约束：
+    //  * - `serde::Deserialize<'static>`: 以便能够从 WebSocket 消息的 JSON 字符串负载中反序列化得到 `P` 的实例。
+    //  * - `std::fmt::Debug`: 以便能够在日志中打印 `action_payload` 的内容，方便调试。
+    //  * - (可能还有其他特定于业务逻辑的 `trait` 约束)
+    //  */
+    // pub async fn update_state_and_get_updated_snapshot<P>(
+    //     &self, 
+    //     group_id: &str, 
+    //     client_role: ClientRole, 
+    //     action_payload: P // 具体的业务操作负载实例
+    // ) -> Option<TaskDebugState> 
+    // where 
+    //     P: serde::Deserialize<'static> + std::fmt::Debug + Send + Sync + 'static, // 确保负载类型满足异步和线程安全要求
+    //     // TaskDebugState: YourStateUpdateTrait<P> // 可能需要一个自定义trait来统一处理不同payload对状态的更新
+    // {
+    //     info!(
+    //          "[任务状态管理器 P3.3.1 规划] 接收到更新组ID '{}' 对应任务状态的请求。操作发起者角色: {:?}, 操作负载详情: {:?}",
+    //          group_id, client_role, action_payload
+    //     );
+    //     if let Some(state_entry_ref) = self.active_task_states.get(group_id) {
+    //         let mut task_state_write_guard = state_entry_ref.value().write().await; // 获取对 TaskDebugState 的异步写锁
+    //         
+    //         // --- 在此实现具体的业务逻辑来根据 action_payload 修改 task_state_write_guard --- 
+    //         // 例如: let state_changed = task_state_write_guard.apply_update_action(client_role, action_payload);
+    //         let state_changed = true; // 假设状态总是改变的 (仅为示例)
+    //         // ------------------------------------------------------------------------------------
+    //         
+    //         if state_changed {
+    //             let updated_snapshot = task_state_write_guard.clone(); // 克隆更新后的状态以供返回和广播
+    //             info!("[任务状态管理器 P3.3.1 规划] 组ID '{}' 的任务状态已成功更新。将返回更新后的快照。", group_id);
+    //             Some(updated_snapshot)
+    //         } else {
+    //             info!("[任务状态管理器 P3.3.1 规划] 组ID '{}' 的任务状态在处理请求后未发生实际变化。将不返回快照。", group_id);
+    //             None
+    //         }
+    //     } else {
+    //         warn!(
+    //             "[任务状态管理器 P3.3.1 规划] 尝试更新组ID '{}' 的任务状态失败：在管理器中未找到该组ID对应的状态条目。操作请求已被忽略。",
+    //             group_id
+    //         );
+    //         None
+    //     }
+    // }
+    // 
+    // /**
+    //  * (P3.3.1 规划) 获取指定组 (`group_id`) 当前任务状态的一个只读快照 (`TaskDebugState` (任务调试状态) 的克隆副本)。
+    //  *
+    //  * 此方法主要用于以下场景：
+    //  * - 当一个新的客户端成功加入一个已在进行中的调试任务组时，`ConnectionManager` (连接管理器) 或 `MessageRouter` (消息路由器) 
+    //  *   可以调用此方法获取该组的当前完整任务状态，然后将其发送给新加入的客户端，使其能够同步到最新的任务进度和数据。
+    //  * - 其他服务端模块如果需要参考某个任务的当前状态 (且不需要修改它)，也可以调用此方法获取一个安全的只读副本。
+    //  *
+    //  * # 参数
+    //  * * `group_id`: `&str` - 要获取其任务状态快照的组的唯一标识符。
+    //  *
+    //  * # 返回值
+    //  * * `Option<TaskDebugState>`: 
+    //  *   - 如果找到了对应 `group_id` 的任务状态，则返回 `Some(task_state_snapshot)`，其中 `task_state_snapshot` 是 `TaskDebugState` (任务调试状态) 的一个克隆副本。
+    //  *   - 如果未找到该 `group_id` (例如，该组从未初始化或已被移除)，则返回 `None`。
+    //  */
+    // pub async fn get_task_state_snapshot(&self, group_id: &str) -> Option<TaskDebugState> {
+    //     info!("[任务状态管理器 P3.3.1 规划] 接收到获取组ID '{}' 对应任务状态快照的请求...", group_id);
+    //     if let Some(state_entry_ref) = self.active_task_states.get(group_id) {
+    //         let task_state_read_guard = state_entry_ref.value().read().await; // 获取对 TaskDebugState 的异步读锁
+    //         let snapshot = task_state_read_guard.clone(); // 从读锁保护的原始状态克隆出一个快照副本
+    //         info!("[任务状态管理器 P3.3.1 规划] 已成功为组ID '{}' 获取任务状态的只读快照。", group_id);
+    //         Some(snapshot)
+    //     } else {
+    //         warn!("[任务状态管理器 P3.3.1 规划] 尝试获取组ID '{}' 的任务状态快照失败：在管理器中未找到该组ID对应的状态条目。", group_id);
+    //         None
+    //     }
+    // }
+    // --- P3.3.1 阶段规划方法示例结束 ---
 }
 
+// 实现 `Default` trait (默认特征) 使得 `TaskStateManager` (任务状态管理器) 可以通过调用 `TaskStateManager::default()` 来创建实例。
+// 这在某些场景下非常方便，例如当 `TaskStateManager` (任务状态管理器) 作为另一个结构体的字段，
+// 并且那个外部结构体派生了 `#[derive(Default)]` 时，Tauri 的状态管理宏也可能利用这一点。
 impl Default for TaskStateManager {
     fn default() -> Self {
+        // `Default::default()` 的实现直接调用我们已经定义的 `new()` 构造函数。
+        // 这确保了通过 `default()` 创建的实例与通过 `new()` 创建的实例具有相同的初始化逻辑。
         Self::new()
     }
 }
 
-// 单元测试 (P3.3.1_Test 中会更全面)
+// 单元测试模块 (`#[cfg(test)]` 属性确保此模块仅在执行 `cargo test` 时被编译)
+// (重要提示：在 P3.3.1 及后续的开发和测试阶段，本模块 (`tests`) 将包含更全面、更复杂的单元测试和可能的集成测试用例。
+//  这些测试将用于验证：
+//  - 任务状态 (`TaskDebugState` - 任务调试状态) 的正确存储和检索。
+//  - 在并发访问场景下 (多个任务同时读写) 的数据安全性和一致性 (通过 `Arc<RwLock<...>>` 和 `DashMap` 保证)。
+//  - 状态更新逻辑 (例如，`update_state_and_get_updated_snapshot` 方法) 是否按预期工作，并能正确处理各种业务场景和边缘情况。
+//  - `TaskStateManager` (任务状态管理器) 与其他核心组件 (如 `ConnectionManager` - 连接管理器, `MessageRouter` - 消息路由器) 的交互是否正确无误。
+// )
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::*; // 从父模块 (即 `crate::ws_server::task_state_manager`) 导入所有公共成员 (如 `TaskStateManager`)，以便在测试函数中使用它们。
+    use log::debug; // 在测试代码中也使用 `debug` 日志宏，方便在测试执行时输出详细的步骤信息。
 
+    // 使用 `#[tokio::test]` 宏来标记异步测试函数。
+    // 这使得我们可以在测试函数内部直接使用 `.await` 语法来调用异步代码。
     #[tokio::test]
-    async fn test_skeleton_task_state_manager_creation_and_init() {
-        let manager = TaskStateManager::new();
-        // 测试骨架方法是否可以被调用且不panic
-        manager.init_task_state("test_group".to_string(), "test_task".to_string()).await;
-        // 这里没有太多可以断言的，因为它是骨架
-        // 主要确保编译通过和方法可调用
-        assert!(true); // Placeholder assertion
+    async fn test_skeleton_task_state_manager_creation_and_init_call() {
+        // 测试目的：验证当前的 `TaskStateManager` (任务状态管理器) 的骨架实现 (P3.1.2 阶段) 能够被成功创建，
+        // 并且其核心方法 (例如 `init_task_state` - 初始化任务状态)，即使它们当前只是空实现或仅包含日志记录，
+        // 也能够被无错误地调用，并且不会导致程序 panic (恐慌) 或其他意外的运行时失败。
+        info!("[单元测试 - TaskStateManager骨架] === 开始执行 TaskStateManager (任务状态管理器) 创建和 init_task_state (初始化任务状态) 调用测试 ===");
+        
+        // 步骤1: 创建 TaskStateManager (任务状态管理器) 实例
+        debug!("[单元测试 - TaskStateManager骨架] 步骤1: 正在调用 TaskStateManager::new() 以创建一个新的管理器实例...");
+        let manager = TaskStateManager::new(); // 调用构造函数
+        debug!("[单元测试 - TaskStateManager骨架] TaskStateManager (任务状态管理器) 实例已成功创建。实例详情 (Debug输出): {:?}", manager);
+        
+        // 步骤2: 调用骨架实现的 `init_task_state` (初始化任务状态) 方法
+        //         为测试提供一些示例性的组ID和任务ID字符串。
+        let test_group_id = "单元测试专用组ID_TSM_001".to_string();
+        let test_task_id = "单元测试专用任务ID_AlphaBuild".to_string();
+        debug!(
+            "[单元测试 - TaskStateManager骨架] 步骤2: 准备调用 manager.init_task_state() 方法。测试参数 - 组ID (group_id): '{}', 任务ID (task_id): '{}'...",
+            test_group_id, test_task_id
+        );
+        // 调用异步方法 `init_task_state` 并使用 `.await` 等待其完成 (尽管在骨架实现中它会立即返回)。
+        manager.init_task_state(test_group_id.clone(), test_task_id.clone()).await;
+        info!(
+            "[单元测试 - TaskStateManager骨架] manager.init_task_state() 方法已为组ID '{}' 和任务ID '{}' 成功调用并返回 (P3.1.2骨架实现，无实际操作)。",
+            test_group_id, test_task_id
+        );
+
+        // 断言 (Assert) 部分：
+        // 由于当前 (P3.1.2) 的 `TaskStateManager` (任务状态管理器) 是一个骨架实现，其内部并没有实际存储任何状态，
+        // 因此我们无法通过检查其内部数据来断言 `init_task_state` (初始化任务状态) 是否按预期工作。
+        // 本测试当前的主要目的是确保代码能够顺利编译通过，并且核心方法（即使它们是空壳或仅记录日志）
+        // 在被调用时不会引发 panic (恐慌) 或其他严重的运行时错误，即验证其可执行性。
+        // 在 P3.3.1 阶段的完整功能实现中，此处的断言将会更加具体和有意义。例如，我们将会检查：
+        // - 调用 `init_task_state` 后，`manager.active_task_states` (活动任务状态) 集合中是否确实创建了
+        //   以 `test_group_id` 为键的新条目。
+        // - 该条目中的 `TaskDebugState` (任务调试状态) 是否已根据 `test_task_id` (或默认逻辑) 正确初始化。
+        // - 再次调用 `init_task_state` (如果设计允许重复调用) 是否有预期的行为 (例如，不重复创建，或更新现有状态)。
+        assert!(true, "这是一个针对P3.1.2骨架实现的占位断言，其设计目的是始终通过测试。它主要验证代码的基本可执行性，而非具体功能逻辑。");
+        info!("[单元测试 - TaskStateManager骨架] === TaskStateManager (任务状态管理器) 创建和 init_task_state (初始化任务状态) 调用测试已成功完成。骨架功能按预期执行 (无实际状态操作，主要依赖日志进行验证)。===");
     }
-} 
+} // 单元测试模块结束 
