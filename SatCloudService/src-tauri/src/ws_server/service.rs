@@ -38,9 +38,10 @@
 use crate::config::WebSocketConfig; // 引入应用内定义的 WebSocket 服务配置信息结构体。
 use crate::ws_server::connection_manager::ConnectionManager; // 引入连接管理器，用于管理客户端会话和组。
 use crate::ws_server::message_router; // 引入消息路由器模块，用于处理和分发收到的 WebSocket 消息。
+use crate::ws_server::task_state_manager::TaskStateManager;
 use anyhow::{Context, Result}; // anyhow Crate (第三方包)，提供方便的错误处理和上下文添加功能。
 use futures_util::stream::SplitStream; // futures-util Crate (第三方包) 的一部分，提供流 (Stream) 处理相关的工具，此处特指用于分离 WebSocket 流的读写部分。
-use log::{debug, error, info, warn}; // 标准日志宏，用于在不同级别记录程序运行信息。
+use tracing::{debug, error, info, warn}; // 从 tracing 日志库中引入不同级别的日志宏。
 use rust_websocket_utils::{ // 从公司内部自定义的 `rust_websocket_utils` WebSocket 工具库导入所需组件。
     message::WsMessage as ActualWsMessage, // WebSocket 消息的标准结构体定义。使用 `as ActualWsMessage` 重命名是为了避免与项目中其他可能名为 `WsMessage` 的类型产生命名冲突，确保使用的是工具库中的定义。
     server::transport::{ // 从工具库的服务端传输层模块 (`server::transport`) 导入。
@@ -52,8 +53,12 @@ use rust_websocket_utils::{ // 从公司内部自定义的 `rust_websocket_utils
 };
 use std::sync::Arc; // 标准库的原子引用计数类型 (`Arc`)，用于在多个线程或异步任务之间安全地共享对象所有权。
 use tokio::sync::mpsc; // Tokio Crate (异步运行时) 提供的异步多生产者、单消费者 (MPSC) 通道，用于在异步任务间安全地传递消息。
-use tokio_tungstenite::WebSocketStream; // Tokio 对 Tungstenite WebSocket 库的集成，表示一个异步的 WebSocket 连接流。
-use tokio::net::TcpStream; // Tokio 提供的异步 TCP 流，是 WebSocket 连接的底层传输基础。
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::protocol::Message as TungsteniteMessage;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::accept_hdr_async; // 使用 accept_hdr_async 替换 accept_async 以便自定义头部
+use std::net::SocketAddr;
 
 /// `WsService` (WebSocket 服务) 结构体定义。
 ///
@@ -61,6 +66,8 @@ use tokio::net::TcpStream; // Tokio 提供的异步 TCP 流，是 WebSocket 连�
 /// - `config`: 服务的配置信息，如监听地址和端口。
 /// - `connection_manager`: 对 `ConnectionManager` (连接管理器) 实例的共享引用 (`Arc`)。
 ///   `ConnectionManager` (连接管理器) 负责管理所有活动的客户端会话及其所属的组。
+/// - `task_state_manager`: 对全局 `TaskStateManager` (任务状态管理器) 实例的共享、线程安全的引用。
+///   `MessageRouter` (消息路由器) 将使用它来处理与任务相关的业务消息并更新共享的任务状态。
 pub struct WsService {
     /// WebSocket 服务的具体配置信息，例如监听的主机地址和端口号。
     /// 这些配置通常在应用启动时从外部文件或环境变量加载。
@@ -70,6 +77,10 @@ pub struct WsService {
     /// `WsService` (WebSocket 服务) 通过此引用来注册新的客户端连接 (`add_client` - 添加客户端)，
     /// 而消息处理逻辑 (如 `message_router` - 消息路由器) 也可能需要通过此引用来查询或修改连接和组的状态。
     connection_manager: Arc<ConnectionManager>,
+
+    /// (P3.3.2 新增) 对全局 `TaskStateManager` (任务状态管理器) 实例的共享、线程安全的引用。
+    /// `MessageRouter` (消息路由器) 将使用它来处理与任务相关的业务消息并更新共享的任务状态。
+    task_state_manager: Arc<TaskStateManager>,
 }
 
 impl WsService {
@@ -81,14 +92,20 @@ impl WsService {
     /// * `config`: `WebSocketConfig` - WebSocket 服务的配置信息对象。
     /// * `connection_manager`: `Arc<ConnectionManager>` - 对 `ConnectionManager` (连接管理器) 实例的共享原子引用计数指针。
     ///   `ConnectionManager` (连接管理器) 应在调用此构造函数之前被创建和初始化。
+    /// * `task_state_manager`: `Arc<TaskStateManager>` - (P3.3.2 新增) 对 `TaskStateManager` (任务状态管理器) 实例的共享引用。
     ///
     /// # 返回值
     /// 返回一个根据传入参数初始化完成的 `WsService` (WebSocket 服务) 实例。
-    pub fn new(config: WebSocketConfig, connection_manager: Arc<ConnectionManager>) -> Self {
+    pub fn new(
+        config: WebSocketConfig, 
+        connection_manager: Arc<ConnectionManager>,
+        task_state_manager: Arc<TaskStateManager>, // P3.3.2 新增参数
+    ) -> Self {
         info!("[WebSocket服务层] 正在创建并初始化一个新的 WsService (WebSocket 服务) 实例...");
         Self {
             config, // 存储传入的配置
             connection_manager, // 存储对连接管理器的共享引用
+            task_state_manager, // P3.3.2 新增：存储对任务状态管理器的共享引用
         }
     }
 
@@ -127,20 +144,17 @@ impl WsService {
         // 定义当 `rust_websocket_utils::start_server` (启动服务器) 接受一个新的客户端 WebSocket 连接时要执行的回调闭包。
         // 这个闭包是异步的 (`async move`)，并且对于每一个成功建立的新连接，都会在其自己的 Tokio 任务中执行。
         let on_new_connection_cb = {
-            // 为闭包克隆 `Arc<ConnectionManager>`。因为闭包会捕获其环境，并且可能比当前函数活得更久
-            // (特别是当它被传递给另一个异步任务时)，我们需要确保它拥有对 `ConnectionManager` (连接管理器) 的有效共享引用。
-            // `Arc::clone` 只会增加引用计数，不会深拷贝数据。
+            // 为闭包克隆 `Arc<ConnectionManager>`。
             let conn_manager_for_cb = Arc::clone(&self.connection_manager);
+            // P3.3.2: 为闭包克隆 `Arc<TaskStateManager>`
+            let task_manager_for_cb = Arc::clone(&self.task_state_manager);
             
             // `move` 关键字确保闭包捕获其使用的外部变量 (如 `conn_manager_for_cb`) 的所有权 (对于 `Arc` 来说是克隆的引用)。
-            // 此闭包接收两个参数，均由 `rust_websocket_utils::start_server` (启动服务器) 在新连接建立时提供：
-            // - `ws_conn_handler`: 一个 `WsConnectionHandler` (WebSocket 连接处理器) 实例，封装了向此特定客户端连接发送消息的方法。
-            // - `ws_receiver`: 一个 `SplitStream<WebSocketStream<TcpStream>>` (分离的WebSocket TCP流)，代表了从此客户端连接接收消息的流。
             move |ws_conn_handler: WsConnectionHandler, mut ws_receiver: SplitStream<WebSocketStream<TcpStream>>| {
                 // 再次为派生的 `async` 块克隆 `Arc<ConnectionManager>`。
-                // 这是因为每个新连接都会在一个独立的 `async` 块 (通常是一个新的 Tokio 任务) 中处理，
-                // 这个 `async` 块也需要对 `ConnectionManager` (连接管理器) 的共享所有权。
                 let connection_manager_clone_for_async_block = Arc::clone(&conn_manager_for_cb);
+                // P3.3.2: 再次为派生的 `async` 块克隆 `Arc<TaskStateManager>`
+                let task_manager_clone_for_async_block = Arc::clone(&task_manager_for_cb);
                 
                 // 为每个新接受的客户端连接创建一个新的异步任务。
                 // 这个任务将负责该连接的整个生命周期内的消息收发和处理。
@@ -347,8 +361,7 @@ impl WsService {
                                     Arc::clone(&client_session_clone_for_router), // 传递对 ClientSession (客户端会话) 的共享引用
                                     ws_msg,                                       // 传递刚接收到的 ActualWsMessage (实际 WebSocket 消息)
                                     Arc::clone(&connection_manager_for_router),   // 传递对 ConnectionManager (连接管理器) 的共享引用
-                                    // TODO (P3.3.2 任务状态同步): 当实现任务状态管理时，可能需要在此处取消注释并传递对 TaskStateManager (任务状态管理器) 的共享引用。
-                                    // Arc::clone(&task_state_manager_for_router) 
+                                    Arc::clone(&task_manager_clone_for_async_block)     // P3.3.2: 传递对 TaskStateManager 的共享引用
                                 )
                                 .await // 等待消息路由器处理此消息完成
                                 {

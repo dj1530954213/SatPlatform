@@ -26,12 +26,16 @@
 //! - **状态清理**: 当一个调试任务正常结束，或其相关的客户端组被解散 (例如，所有客户端都已断开连接) 时，
 //!   本管理器需要负责从其内部存储中移除对应的任务状态，以释放占用的系统资源。
 
-use log::{info, warn, error}; // 移除了未使用的 'debug'
+use log::{info, warn}; // 移除了未使用的 'debug' 和 'error'
 use std::sync::Arc; // `Arc` (原子引用计数) 将用于安全地共享 TaskStateManager 实例以及单个 TaskDebugState 实例的所有权。
 use dashmap::DashMap; // `DashMap` 是一个高性能的并发哈希映射库，计划用于存储 `group_id` 到 `TaskDebugState` 的映射。
 use tokio::sync::RwLock; // Tokio 提供的异步读写锁 (`RwLock`)，将用于保护对单个 `TaskDebugState` 实例内部数据的并发读写访问，确保数据一致性。
 use common_models::TaskDebugState; // 从 `common_models` (公共模型) crate 引入任务调试状态的详细结构体定义。
 use common_models::enums::ClientRole; // 从 `common_models` (公共模型) crate 引入客户端角色枚举，在实现 P3.3.1 的状态更新方法时可能会根据角色进行权限检查或逻辑分支。
+use common_models::ws_payloads::BusinessActionPayload; // 引入业务Action Payload
+use common_models::task_models::PreCheckItemStatus; // Keep PreCheckItemStatus
+use chrono::Utc; // 引入Utc以获取当前时间
+// use serde_json; // serde_json is unused
 
 /// `TaskStateManager` (任务状态管理器) 结构体的定义 (当前为P3.1.2阶段的骨架实现)。
 /// 
@@ -178,59 +182,100 @@ impl TaskStateManager {
     /// # Arguments
     /// * `group_id` - 任务状态所属的组ID。
     /// * `updater_role` - 执行更新操作的客户端角色。
-    /// * `payload` - 具体的业务消息 Payload (这里用泛型占位，实际应为具体的业务 Payload 类型，或一个枚举)。
+    /// * `payload` - 具体的业务消息 Payload (在P3.3.2的初始实现中，我们临时使用 serde_json::Value 以便灵活处理，
+    ///   未来应演化为更具体的业务 Payload 枚举或 Trait 对象)。
     ///
     /// # Returns
     /// * `Some(TaskDebugState)` 如果状态被成功修改，则返回修改后状态的一个克隆。
     /// * `None` 如果状态没有发生实际改变，或者找不到对应的任务状态。
-    pub async fn update_state_and_get_updated<P: serde::Serialize + std::fmt::Debug>(
+    pub async fn update_state_and_get_updated(
         &self,
         group_id: &str,
         updater_role: ClientRole,
-        payload: P, // P 应该是一个代表所有业务消息 Payload 的枚举或 trait 对象
+        action_payload: BusinessActionPayload, 
     ) -> Option<TaskDebugState> {
         info!(
-            "[P3.3.1 骨架] 收到为 group_id '{}' 更新任务状态的请求。更新者角色: {:?}, Payload: {:?}",
-            group_id, updater_role, payload
+            "[任务状态管理器] 尝试为 group_id '{}' 更新任务状态。更新者角色: {:?}, ActionPayload: {:?}",
+            group_id, updater_role, action_payload
         );
 
-        match self.active_task_states.get(group_id) {
-            Some(task_state_arc_ref) => {
-                let task_state_arc = task_state_arc_ref.value().clone();
-                let task_state_guard = task_state_arc.write().await; // 获取写锁 (移除 mut)
+        match self.active_task_states.get_mut(group_id) { // 使用 get_mut 获取可写锁
+            Some(mut task_state_entry) => {
+                let mut task_state = task_state_entry.value_mut().write().await; // 获取写锁
+                let mut state_changed = false;
 
-                // --- P3.3.2 将在此处实现具体的业务逻辑来修改 task_state_guard --- 
-                // 例如：
-                // let mut changed = false;
-                // match payload_type_or_enum {
-                //     BusinessPayload::UpdatePreCheck(p) => {
-                //         // ... 修改 task_state_guard.pre_check_items ...
-                //         // if (修改成功) changed = true;
-                //     }
-                //     // ... 其他业务 Payload 处理 ...
-                // }
-                // 
-                // if changed {
-                //     task_state_guard.last_updated_by_role = Some(updater_role);
-                //     task_state_guard.last_update_timestamp = chrono::Utc::now().timestamp_millis();
-                //     info!("任务状态 (task_id: '{}', group_id: '{}') 已更新。", task_state_guard.task_id, group_id);
-                //     Some(task_state_guard.clone()) // 返回克隆的已更新状态
-                // } else {
-                //     info!("任务状态 (task_id: '{}', group_id: '{}') 未发生实际改变。", task_state_guard.task_id, group_id);
-                //     None
-                // }
-                // ---------------------------------------------------------------------
-                
-                warn!(
-                    "[P3.3.1 骨架] update_state_and_get_updated for group_id '{}' (task_id: '{}') 尚未实现具体状态更新逻辑，返回 None。",
-                    group_id, task_state_guard.task_id
-                );
-                None // P3.3.1 阶段，假装状态未改变
+                match action_payload {
+                    BusinessActionPayload::UpdatePreCheckItem(payload) => {
+                        info!("[任务状态管理器] 处理 UpdatePreCheckItem: {:?}", payload);
+                        let item_id = payload.item_id.clone();
+                        
+                        let pre_check_item = task_state.pre_check_items
+                            .entry(item_id.clone())
+                            .or_insert_with(|| PreCheckItemStatus::new(item_id));
+
+                        // 根据 updater_role 更新不同的字段
+                        // 这里是一个简化的示例，实际应用中可能需要更复杂的逻辑来决定哪些字段可以被哪个角色更新
+                        let current_time = Utc::now();
+                        match updater_role {
+                            ClientRole::OnSiteMobile => {
+                                if pre_check_item.status_from_site != Some(payload.status.clone()) || pre_check_item.notes_from_site != payload.notes {
+                                    pre_check_item.status_from_site = Some(payload.status);
+                                    pre_check_item.notes_from_site = payload.notes;
+                                    pre_check_item.last_updated = current_time;
+                                    state_changed = true;
+                                }
+                            }
+                            ClientRole::ControlCenter => {
+                                if pre_check_item.status_from_control != Some(payload.status.clone()) || pre_check_item.notes_from_control != payload.notes {
+                                    pre_check_item.status_from_control = Some(payload.status);
+                                    pre_check_item.notes_from_control = payload.notes;
+                                    pre_check_item.last_updated = current_time;
+                                    state_changed = true;
+                                }
+                            }
+                            _ => {
+                                warn!("[任务状态管理器] UpdatePreCheckItem 操作被角色 {:?} 尝试，但此角色没有明确的更新权限或逻辑。", updater_role);
+                            }
+                        }
+                    }
+                    BusinessActionPayload::StartSingleTestStep(payload) => {
+                        // TODO: 实现 StartSingleTestStep 的逻辑
+                        info!("[任务状态管理器] TODO: 处理 StartSingleTestStep: {:?}", payload);
+                        // state_changed = ...;
+                    }
+                    BusinessActionPayload::FeedbackSingleTestStep(payload) => {
+                        // TODO: 实现 FeedbackSingleTestStep 的逻辑
+                        info!("[任务状态管理器] TODO: 处理 FeedbackSingleTestStep: {:?}", payload);
+                        // state_changed = ...;
+                    }
+                    BusinessActionPayload::ConfirmSingleTestStep(payload) => {
+                        // TODO: 实现 ConfirmSingleTestStep 的逻辑
+                        info!("[任务状态管理器] TODO: 处理 ConfirmSingleTestStep: {:?}", payload);
+                        // state_changed = ...;
+                    }
+                }
+
+                if state_changed {
+                    task_state.last_updated_by_role = Some(updater_role);
+                    task_state.last_update_timestamp = Utc::now();
+                    task_state.version += 1; // 版本号递增
+                    info!(
+                        "[任务状态管理器] group_id '{}' 的任务状态已更新。新版本: {}. 最后更新者: {:?}",
+                        group_id, task_state.version, updater_role
+                    );
+                    Some(task_state.clone()) // 返回更新后状态的克隆
+                } else {
+                    info!(
+                        "[任务状态管理器] group_id '{}' 的任务状态未发生实际改变。",
+                        group_id
+                    );
+                    None
+                }
             }
             None => {
-                error!(
-                    "尝试为不存在的 group_id '{}' 更新任务状态。Payload: {:?}, Role: {:?}",
-                    group_id, payload, updater_role
+                warn!(
+                    "[任务状态管理器] 尝试更新不存在的 group_id '{}' 的任务状态。",
+                    group_id
                 );
                 None
             }

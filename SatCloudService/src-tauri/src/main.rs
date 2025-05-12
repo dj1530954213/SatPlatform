@@ -78,7 +78,12 @@ fn main() {
 
             // 为 WebSocket 服务创建一个新的 WsService 实例。
             // 它需要应用的 WebSocket 配置 (从 app_config 中获取) 和对 ConnectionManager 的共享引用。
-            let ws_service_instance = WsService::new(app_config.websocket.clone(), connection_manager.clone());
+            // P3.3.2: 同时还需要传递对 TaskStateManager 的共享引用。
+            let ws_service_instance = WsService::new(
+                app_config.websocket.clone(), 
+                connection_manager.clone(),
+                task_state_manager.clone(), // P3.3.2: 传递 TaskStateManager
+            );
             
             // 使用 Tauri 的异步运行时 (tauri::async_runtime::spawn) 在后台启动 WebSocket 服务。
             // 这是一个独立的异步任务，不会阻塞 setup 钩子或主线程。

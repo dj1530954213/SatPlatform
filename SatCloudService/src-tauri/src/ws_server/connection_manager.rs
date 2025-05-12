@@ -780,6 +780,56 @@ impl ConnectionManager {
             None // 如果组不存在，返回 None
         }
     }
+
+    /// 获取指定组ID中所有活动客户端会话的列表，可以选择排除一个特定的客户端ID。
+    /// 此方法主要用于向组内伙伴广播消息的场景。
+    ///
+    /// # 参数
+    /// * `group_id`: `&str` - 目标组的ID。
+    /// * `exclude_client_id`: `Option<&Uuid>` - 如果提供了此ID，则返回的列表中将不包含此客户端。
+    ///
+    /// # 返回值
+    /// 返回一个包含组内符合条件的 `ClientSession` 的 `Arc` 引用的 `Vec`。
+    /// 如果组不存在或组内没有（符合条件的）成员，则返回空 `Vec`。
+    pub async fn get_group_members_for_broadcast(
+        &self,
+        group_id: &str,
+        exclude_client_id: Option<&Uuid>,
+    ) -> Vec<Arc<ClientSession>> {
+        let mut members = Vec::new();
+        if let Some(group_entry) = self.groups.get(group_id) {
+            let group_lock = group_entry.value();
+            let group = group_lock.read().await; // 获取组的读锁
+
+            // 检查控制中心客户端
+            if let Some(cc_client) = &group.control_center_client {
+                if exclude_client_id.map_or(true, |id| id != &cc_client.client_id) {
+                    members.push(cc_client.clone());
+                }
+            }
+
+            // 检查现场移动端客户端
+            if let Some(os_client) = &group.on_site_mobile_client {
+                if exclude_client_id.map_or(true, |id| id != &os_client.client_id) {
+                    members.push(os_client.clone());
+                }
+            }
+            
+            // 未来如果 Group 结构支持更多类型的客户端或观察者 (e.g., additional_observers)，
+            // 也需要在此处添加逻辑来遍历它们并根据 exclude_client_id 进行过滤。
+
+            debug!(
+                "[连接管理器] 为组 '{}' 获取广播成员列表。排除客户端ID: {:?}. 最终成员数: {}.",
+                group_id, exclude_client_id, members.len()
+            );
+        } else {
+            warn!(
+                "[连接管理器] 尝试为不存在的组 '{}' 获取广播成员列表。",
+                group_id
+            );
+        }
+        members
+    }
 }
 
 // 为 ConnectionManager 实现 Default trait。

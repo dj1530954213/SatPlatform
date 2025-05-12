@@ -38,8 +38,26 @@ pub const FEEDBACK_SINGLE_TEST_STEP_TYPE: &str = "FeedbackSingleTestStep";
 /// 用于中心端确认现场端反馈的单体测试步骤结果的消息类型。
 pub const CONFIRM_SINGLE_TEST_STEP_TYPE: &str = "ConfirmSingleTestStep";
 
-/// 用于云端主动向客户端推送完整的、已更新的任务调试状态的消息类型。
+/// 用于服务端主动向客户端推送完整的任务调试状态更新。
+/// 当云端权威的 `TaskDebugState` 因某一客户端的操作而发生改变后，
+/// 服务端会使用此消息类型，将更新后的整个 `TaskDebugState` 对象序列化后，
+/// 作为 payload 发送给同一任务组内的其他伙伴客户端。
 pub const TASK_STATE_UPDATE_MESSAGE_TYPE: &str = "TaskStateUpdate";
+
+/// 业务操作Payload的枚举。
+///
+/// 此枚举封装了所有由客户端发起、旨在改变或查询任务调试状态的业务消息的Payload。
+/// 它使得在 `TaskStateManager` 中可以统一处理不同类型的业务请求。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "action_type", content = "action_payload")] // 使用内部标签来区分枚举成员
+pub enum BusinessActionPayload {
+    UpdatePreCheckItem(crate::task_models::UpdatePreCheckItemPayload),
+    StartSingleTestStep(crate::task_models::StartSingleTestStepPayload),
+    FeedbackSingleTestStep(crate::task_models::FeedbackSingleTestStepPayload),
+    ConfirmSingleTestStep(crate::task_models::ConfirmSingleTestStepPayload),
+    // 未来可以添加更多的业务操作类型
+    // Example: UpdateInterlockCondition(crate::task_models::UpdateInterlockConditionPayload),
+}
 
 /// EchoPayload 是一个简单的负载，用于测试 WebSocket 通信。
 /// 它包含一个字符串内容，期望被服务器回显。

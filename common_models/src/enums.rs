@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// 这个枚举用于区分不同类型的客户端（例如控制中心、现场移动端），
 /// 以便服务器能够根据其角色应用不同的逻辑、权限或数据分发策略。
 /// 它也用于在客户端之间进行识别和状态同步。
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientRole {
     /// 代表 `SatControlCenter` (控制中心) 类型的客户端。
     /// 通常负责任务的发起、监控、指令下发和全局状态的查看。

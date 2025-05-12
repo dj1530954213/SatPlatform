@@ -43,8 +43,7 @@ use common_models::ws_payloads::{ // 从共享模型库引入 WebSocket 消息�
 use rust_websocket_utils::message::WsMessage; // 从公司内部的 WebSocket 工具库引入标准 WebSocket 消息体结构定义。
 use super::client_session::ClientSession; // 引入同一模块层级下的 `client_session` 子模块中定义的 `ClientSession` 结构体。
 use super::connection_manager::ConnectionManager; // 引入同一模块层级下的 `connection_manager` 子模块中定义的 `ConnectionManager` 结构体 (P3.1.2 新增)。
-// 提醒 (P3.3.2): 如果业务消息处理逻辑被封装在 TaskStateManager 或其他新模块中，需要在此处引入它们。
-// use super::task_state_manager::TaskStateManager; // (示例性，待 P3.3.2 实现时取消注释并确认路径)
+use super::task_state_manager::TaskStateManager; // P3.3.2: 引入 TaskStateManager
 
 /// 异步处理从特定客户端接收到的单个 WebSocket 消息 (`WsMessage`)。
 ///
@@ -83,8 +82,8 @@ use super::connection_manager::ConnectionManager; // 引入同一模块层级下
 /// * `message`: `WsMessage` - 从客户端接收到的、需要被处理的实际 WebSocket 消息实例。
 /// * `connection_manager`: `Arc<ConnectionManager>` - (P3.1.2 新增) 对 `ConnectionManager` 实例的共享引用。
 ///   `ConnectionManager` 负责管理客户端的组信息和注册流程，因此在处理如 "Register" (注册) 类型的消息时需要用到它。
-/// * `_task_state_manager`: `Arc<TaskStateManager>` - (P3.3.2 规划中，目前用 `_` 忽略) 对 `TaskStateManager` 实例的共享引用。
-///   未来当实现处理具体业务数据同步的消息类型时，将通过此参数与 `TaskStateManager` 交互。
+/// * `task_state_manager`: `Arc<TaskStateManager>` - (P3.3.2 新增) 对 `TaskStateManager` 实例的共享引用，
+///   用于处理业务相关的消息并更新任务状态。
 ///
 /// # 返回值
 /// * `Result<(), anyhow::Error>`: 
@@ -97,7 +96,7 @@ pub async fn handle_message(
     client_session: Arc<ClientSession>,
     message: WsMessage,
     connection_manager: Arc<ConnectionManager>, // P3.1.2: 添加 ConnectionManager 作为参数
-    // _task_state_manager: Arc<TaskStateManager>, // P3.3.2: 占位，未来用于业务消息处理
+    task_state_manager: Arc<TaskStateManager>, // P3.3.2: 添加 TaskStateManager 作为参数
 ) -> Result<(), anyhow::Error> {
     // 步骤 1: 更新客户端会话的 `last_seen` 时间戳，记录其最近的活跃时间。
     // 这是心跳机制 (`HeartbeatMonitor`) 判断客户端是否超时的关键依据。
@@ -353,78 +352,274 @@ pub async fn handle_message(
             }
         }
 
-        // TODO (P3.3.2 - 业务消息处理与状态同步):
-        // 此处将是未来添加处理具体业务相关消息类型 (例如 "UpdatePreCheckItem" (更新预检项), "StartSingleTestStep" (开始单步测试), 
-        // "FeedbackSingleTestStepResult" (反馈单步测试结果), "ConfirmSingleTestStep" (确认单步测试), "UpdateInterlockCondition" (更新联锁条件) 等) 的分支。
-        // 
-        // 对于每一种业务消息类型，其大致处理流程可能如下：
-        // 1. **权限/状态检查 (可选但推荐)**:
-        //    - 检查发起此操作的 `client_session.role` 是否有权限执行此操作。
-        //    - 检查 `client_session.group_id` 是否有效，以及该组是否处于允许此操作的状态。
-        // 2. **负载解析**: 将 `message.payload` 反序列化为该业务消息对应的特定 Payload 结构体 
-        //    (例如，`UpdatePreCheckItemPayload`)。
-        // 3. **调用 TaskStateManager**: 将解析后的 Payload 和相关上下文 (如 `group_id`, `client_role`)
-        //    传递给 `TaskStateManager` 的某个方法 (例如，`task_state_manager.update_task_debug_state(...)`)。
-        //    `TaskStateManager` 将负责根据输入更新其内部维护的对应任务 (`TaskDebugState`) 的权威数据模型。
-        // 4. **处理 TaskStateManager 的返回值**: 
-        //    - `TaskStateManager` 的更新方法可能会返回更新后的完整 `TaskDebugState`，或者一个指示是否发生变化的标志。
-        //    - 如果状态确实发生了改变，则需要将这个更新后的状态通知给组内的伙伴客户端。
-        // 5. **向伙伴客户端分发状态更新**:
-        //    a. 使用 `ConnectionManager` 找到与当前 `client_session` 在同一组内的伙伴客户端的 `ClientSession`。
-        //    b. 创建一个新的 `WsMessage`，其 `message_type` 应为一个专用的全局状态更新类型 
-        //       (例如，`ws_payloads::TASK_STATE_UPDATE_MESSAGE_TYPE`，其值为 "TaskStateUpdate" (任务状态更新))。
-        //    c. 将从 `TaskStateManager` 获取到的、已更新的完整 `TaskDebugState` 实例序列化为 JSON 字符串，
-        //       作为此 "TaskStateUpdate" (任务状态更新) 消息的 `payload`。
-        //    d. 通过伙伴客户端的 `sender` 将此 "TaskStateUpdate" (任务状态更新) 消息异步发送出去。
-        // 6. **向原始请求客户端发送确认 (可选)**: 根据业务需求，可能需要向发起业务操作的客户端
-        //    发送一个简单的确认消息 (例如，`{ "success": true, "message": "操作已处理" }`)，或者如果操作
-        //    本身就是状态更新的一部分，则它也会收到上述的全局 "TaskStateUpdate" (任务状态更新) 消息，可能无需额外确认。
-        // 7. **错误处理**: 对 Payload 解析失败、权限不足、或 `TaskStateManager` 返回业务错误等情况，
-        //    应向原始请求客户端发送包含具体错误信息的 `ErrorResponsePayload`。
-        //
-        // 示例占位 (实际实现时会替换为具体的业务消息类型常量和逻辑):
-        // ws_payloads::UPDATE_PRE_CHECK_ITEM_TYPE => { 
-        //     info!("[消息路由] 客户端 {}：收到模拟的 更新预检查项 请求。", client_session.client_id);
-        //     // ... 实现上述1-7的逻辑 ...
-        //     // 例如: send_error_response(&client_session, Some("UpdatePreCheckItem".to_string()), "功能正在开发中，敬请期待。".to_string()).await;
-        // }
-
-        // 默认分支: 处理所有未被以上 `match`臂匹配到的未知消息类型。
-        _ => { // `_` 是一个通配符，匹配任何其他字符串值
-            warn!(
-                "[消息路由] 客户端 {} (地址: {})：收到未知或当前不支持的消息类型: '{}'。原始负载: '{}'",
-                client_session.client_id, client_session.addr, message.message_type, message.payload
+        // 分支 2.4 (P3.3.2 新增): 处理 "UpdatePreCheckItem" 类型的消息
+        ws_payloads::UPDATE_PRE_CHECK_ITEM_TYPE => {
+            info!(
+                "[消息路由] 客户端 {} (地址: {}): 正在处理 UpdatePreCheckItem 请求。",
+                client_session.client_id, client_session.addr
             );
-            // 向客户端发送一个标准的错误响应，告知其消息类型不被支持。
-            send_error_response(
-                &client_session, // 目标客户端会话
-                Some(message.message_type.clone()), // 包含原始的、未被识别的消息类型
-                format!("服务器不支持消息类型 '{}'，或者该类型当前未实现处理逻辑。", message.message_type),
-            )
-            .await; // 等待错误响应发送完成（或失败）
+
+            let group_id_clone;
+            let client_role_clone;
+            {
+                let group_id_guard = client_session.group_id.read().await;
+                let role_guard = client_session.role.read().await;
+                if group_id_guard.is_none() || *role_guard == common_models::enums::ClientRole::Unknown {
+                    warn!(
+                        "[消息路由] 客户端 {} (地址: {}): 尝试在未注册或未分配角色的情况下发送 UpdatePreCheckItem。忽略。",
+                        client_session.client_id, client_session.addr
+                    );
+                    send_error_response(
+                        &client_session,
+                        Some(ws_payloads::UPDATE_PRE_CHECK_ITEM_TYPE.to_string()),
+                        "客户端未注册到有效调试组或角色未知，无法处理此业务请求。".to_string(),
+                    )
+                    .await;
+                    return Ok(()); // 提前返回，不继续处理
+                }
+                group_id_clone = group_id_guard.as_ref().unwrap().clone();
+                client_role_clone = role_guard.clone();
+            }
+
+            match serde_json::from_str::<common_models::task_models::UpdatePreCheckItemPayload>(&message.payload) {
+                Ok(parsed_payload) => {
+                    debug!(
+                        "[消息路由] 客户端 {}: UpdatePreCheckItemPayload 解析成功: {:?}",
+                        client_session.client_id, parsed_payload
+                    );
+
+                    let action_payload = common_models::ws_payloads::BusinessActionPayload::UpdatePreCheckItem(parsed_payload);
+
+                    match task_state_manager.update_state_and_get_updated(&group_id_clone, client_role_clone, action_payload).await {
+                        Some(updated_task_state) => {
+                            info!(
+                                "[消息路由] group_id '{}' 的 TaskDebugState 已更新。版本: {}. 准备通知伙伴客户端。", 
+                                group_id_clone, updated_task_state.version
+                            );
+                            // 状态已更新，需要通知同组的其他伙伴客户端
+                            if let Some(group_guard) = connection_manager.get_group(&group_id_clone).await {
+                                let mut recipients_found = false;
+
+                                // 确定伙伴客户端并发送消息
+                                let partner_sessions_to_notify: Vec<Arc<ClientSession>> = match client_role_clone {
+                                    common_models::enums::ClientRole::ControlCenter => {
+                                        group_guard.on_site_mobile_client.iter().cloned().collect()
+                                    }
+                                    common_models::enums::ClientRole::OnSiteMobile => {
+                                        group_guard.control_center_client.iter().cloned().collect()
+                                    }
+                                    _ => Vec::new(), // 其他角色目前不处理伙伴通知
+                                };
+
+                                for partner_session in partner_sessions_to_notify {
+                                    // 确保不会给自己发送通知 (虽然按角色区分已避免大部分情况，但作为双重检查)
+                                    if partner_session.client_id != client_session.client_id {
+                                        recipients_found = true;
+                                        match WsMessage::new(ws_payloads::TASK_STATE_UPDATE_MESSAGE_TYPE.to_string(), &updated_task_state) {
+                                            Ok(state_update_msg) => {
+                                                if let Err(e) = partner_session.sender.send(state_update_msg).await {
+                                                    error!(
+                                                        "[消息路由] 向伙伴客户端 {} (组 '{}') 发送 TaskStateUpdate 失败: {}",
+                                                        partner_session.client_id, group_id_clone, e
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "[消息路由] 为伙伴客户端 {} (组 '{}') 创建 TaskStateUpdate 消息失败: {}",
+                                                    partner_session.client_id, group_id_clone, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                if recipients_found {
+                                    info!("[消息路由] 已向组 '{}' 内的伙伴客户端发送 TaskStateUpdate。", group_id_clone);
+                                } else {
+                                    info!("[消息路由] 组 '{}' 内没有需要通知的伙伴客户端。", group_id_clone);
+                                }
+                            } else {
+                                warn!("[消息路由] 未找到 group_id '{}' 对应的组信息，无法通知伙伴。", group_id_clone);
+                            }
+                        }
+                        None => {
+                            info!(
+                                "[消息路由] group_id '{}' 的 TaskDebugState 未发生变化，无需通知伙伴。",
+                                group_id_clone
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "[消息路由] 客户端 {} (地址: {}): 解析 UpdatePreCheckItem 请求的负载 (UpdatePreCheckItemPayload) 失败: {}. 原始JSON负载: '{}'",
+                        client_session.client_id, client_session.addr, e, message.payload
+                    );
+                    send_error_response(
+                        &client_session,
+                        Some(ws_payloads::UPDATE_PRE_CHECK_ITEM_TYPE.to_string()),
+                        format!("UpdatePreCheckItem 请求的负载格式无效: {}.", e),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // 分支 P3.3.2: 处理 "StartSingleTestStep" 类型的消息
+        ws_payloads::START_SINGLE_TEST_STEP_TYPE => {
+            info!(
+                "[消息路由] 客户端 {} (地址: {}): 正在处理 StartSingleTestStep 请求。",
+                client_session.client_id, client_session.addr
+            );
+            let (group_id_clone, client_role_clone) = 
+                if let (Some(gid), role) = (client_session.group_id.read().await.as_ref(), *client_session.role.read().await) {
+                    if role != common_models::enums::ClientRole::Unknown { (gid.clone(), role) } else { send_unregistered_error(&client_session, ws_payloads::START_SINGLE_TEST_STEP_TYPE).await; return Ok(()); }
+                } else { send_unregistered_error(&client_session, ws_payloads::START_SINGLE_TEST_STEP_TYPE).await; return Ok(()); };
+
+            match serde_json::from_str::<common_models::task_models::StartSingleTestStepPayload>(&message.payload) {
+                Ok(parsed_payload) => {
+                    debug!(
+                        "[消息路由] 客户端 {}: StartSingleTestStepPayload 解析成功: {:?}",
+                        client_session.client_id, parsed_payload
+                    );
+                    let action_payload = common_models::ws_payloads::BusinessActionPayload::StartSingleTestStep(parsed_payload);
+                    process_business_action_and_notify_partners(
+                        &client_session,
+                        &group_id_clone,
+                        client_role_clone,
+                        action_payload,
+                        &task_state_manager,
+                        &connection_manager,
+                        ws_payloads::START_SINGLE_TEST_STEP_TYPE
+                    ).await;
+                }
+                Err(e) => {
+                    send_payload_parse_error(&client_session, ws_payloads::START_SINGLE_TEST_STEP_TYPE, &e.to_string(), &message.payload).await;
+                }
+            }
+        }
+
+        // 分支 P3.3.2: 处理 "FeedbackSingleTestStep" 类型的消息
+        ws_payloads::FEEDBACK_SINGLE_TEST_STEP_TYPE => {
+            info!(
+                "[消息路由] 客户端 {} (地址: {}): 正在处理 FeedbackSingleTestStep 请求。",
+                client_session.client_id, client_session.addr
+            );
+            let (group_id_clone, client_role_clone) = 
+                if let (Some(gid), role) = (client_session.group_id.read().await.as_ref(), *client_session.role.read().await) {
+                    if role != common_models::enums::ClientRole::Unknown { (gid.clone(), role) } else { send_unregistered_error(&client_session, ws_payloads::FEEDBACK_SINGLE_TEST_STEP_TYPE).await; return Ok(()); }
+                } else { send_unregistered_error(&client_session, ws_payloads::FEEDBACK_SINGLE_TEST_STEP_TYPE).await; return Ok(()); };
+
+            match serde_json::from_str::<common_models::task_models::FeedbackSingleTestStepPayload>(&message.payload) {
+                Ok(parsed_payload) => {
+                    debug!(
+                        "[消息路由] 客户端 {}: FeedbackSingleTestStepPayload 解析成功: {:?}",
+                        client_session.client_id, parsed_payload
+                    );
+                    let action_payload = common_models::ws_payloads::BusinessActionPayload::FeedbackSingleTestStep(parsed_payload);
+                    process_business_action_and_notify_partners(
+                        &client_session,
+                        &group_id_clone,
+                        client_role_clone,
+                        action_payload,
+                        &task_state_manager,
+                        &connection_manager,
+                        ws_payloads::FEEDBACK_SINGLE_TEST_STEP_TYPE
+                    ).await;
+                }
+                Err(e) => {
+                    send_payload_parse_error(&client_session, ws_payloads::FEEDBACK_SINGLE_TEST_STEP_TYPE, &e.to_string(), &message.payload).await;
+                }
+            }
+        }
+
+        // 分支 P3.3.2: 处理 "ConfirmSingleTestStep" 类型的消息
+        ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE => {
+            info!(
+                "[消息路由] 客户端 {} (地址: {}): 正在处理 ConfirmSingleTestStep 请求。",
+                client_session.client_id, client_session.addr
+            );
+            let (group_id_clone, client_role_clone) = 
+                if let (Some(gid), role) = (client_session.group_id.read().await.as_ref(), *client_session.role.read().await) {
+                    if role != common_models::enums::ClientRole::Unknown { (gid.clone(), role) } else { send_unregistered_error(&client_session, ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE).await; return Ok(()); }
+                } else { send_unregistered_error(&client_session, ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE).await; return Ok(()); };
+
+            match serde_json::from_str::<common_models::task_models::ConfirmSingleTestStepPayload>(&message.payload) {
+                Ok(parsed_payload) => {
+                    debug!(
+                        "[消息路由] 客户端 {}: ConfirmSingleTestStepPayload 解析成功: {:?}",
+                        client_session.client_id, parsed_payload
+                    );
+                    let action_payload = common_models::ws_payloads::BusinessActionPayload::ConfirmSingleTestStep(parsed_payload);
+                    process_business_action_and_notify_partners(
+                        &client_session,
+                        &group_id_clone,
+                        client_role_clone,
+                        action_payload,
+                        &task_state_manager,
+                        &connection_manager,
+                        ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE
+                    ).await;
+                }
+                Err(e) => {
+                    send_payload_parse_error(&client_session, ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE, &e.to_string(), &message.payload).await;
+                }
+            }
+        }
+
+        // 默认分支：处理所有其他未被显式匹配到的消息类型。
+        // 这些消息类型当前不被 TaskStateManager 作为具体的业务操作处理。
+        actual_message_type_str => {
+            info!(
+                "[消息路由] 客户端 {} (地址: {}): 收到消息类型 '{}', 该类型未在前面显式匹配为已知业务操作。",
+                client_session.client_id, client_session.addr, actual_message_type_str
+            );
+
+            // 检查客户端是否已注册并具有有效角色。业务消息处理的前提。
+            let is_registered_with_role;
+            { // 限制读锁的作用域
+                let group_id_guard = client_session.group_id.read().await;
+                let role_guard = client_session.role.read().await;
+                is_registered_with_role = group_id_guard.is_some() && *role_guard != common_models::enums::ClientRole::Unknown;
+            }
+
+            if !is_registered_with_role {
+                // 如果客户端未注册或角色未知，则发送通用未注册错误。
+                send_unregistered_error(&client_session, actual_message_type_str).await;
+            } else {
+                // 客户端已注册，但消息类型不是 TaskStateManager 设计用来处理的已知业务操作。
+                warn!(
+                    "[消息路由] 客户端 {} (地址: {}): 消息类型 '{}' 不被识别为一个已知的业务操作，因此 TaskStateManager 不会处理。原始Payload: '{}'",
+                    client_session.client_id, client_session.addr, actual_message_type_str, message.payload
+                );
+                
+                send_error_response(
+                    &client_session,
+                    Some(actual_message_type_str.to_string()),
+                    format!("不支持的消息类型 '{}'，或该类型不被识别为有效的业务操作。", actual_message_type_str),
+                )
+                .await;
+            }
         }
     }
+    Ok(())
+}
 
-    Ok(()) // 表示此 `handle_message` 调用已成功完成其主要处理流程。
-} // handle_message 函数结束
-
-/// 辅助函数：向指定的客户端会话异步发送一个标准格式的错误响应消息。
+/// 辅助函数，用于向指定的客户端会话发送标准格式的错误响应消息。
 ///
-/// 此函数封装了创建和发送 `ErrorResponsePayload` 的通用逻辑，简化了在多个错误处理点重复编写相似代码的需求。
+/// 此函数封装了创建和发送 `ErrorResponsePayload` 的通用逻辑，简化了在多个错误处理点重复代码的需要。
 ///
 /// # 参数
-/// * `client_session`: `&Arc<ClientSession>` - 对目标客户端的 `ClientSession` 的共享引用。
-///   错误响应将被发送到此会话所代表的客户端。
-/// * `original_message_type`: `Option<String>` - 可选参数，如果错误是针对某个特定类型的原始请求消息，
-///   则此参数应包含该原始消息的 `message_type` 字符串。这有助于客户端将错误与原始请求关联起来。
-///   如果错误不是针对特定请求类型（例如，一个通用的连接错误），则可以传入 `None`。
-/// * `error_message_text`: `String` - 描述错误的具体文本信息。此信息将包含在发送给客户端的
-///   `ErrorResponsePayload` 的 `message` 字段中。
+/// * `client_session`: `&Arc<ClientSession>` - 对目标客户端 `ClientSession` 实例的共享引用。
+///   错误响应将通过此会话的 `sender` 发送。
+/// * `original_message_type`: `Option<String>` - 可选的字符串，表示导致错误的原始请求的消息类型。
+///   如果提供，它将被包含在 `ErrorResponsePayload` 中，以帮助客户端关联错误与其原始请求。
+/// * `error_message_text`: `String` - 描述错误的具体文本信息。这将作为 `ErrorResponsePayload` 中 `error` 字段的值。
 ///
 /// # 注意
-/// 此函数会尝试发送错误响应，但如果发送本身失败 (例如，客户端已断开连接)，
-/// 它会记录一个错误日志，但不会将此发送失败作为错误传播回调用者 (即，它不返回 `Result`)。
-/// 这是为了避免因尝试报告一个错误而引发另一个需要处理的错误，从而简化上层错误处理逻辑。
+/// 此函数是异步的 (`async`)，因为它内部调用了异步的 `client_session.sender.send(...).await`。
+/// 它会记录尝试发送错误响应的日志，以及发送成功或失败的结果。发送失败通常意味着客户端已断开连接，
+/// 此时仅记录错误，不会进一步传播错误，以保持消息处理的健壮性。
 async fn send_error_response(
     client_session: &Arc<ClientSession>,    // 目标客户端会话
     original_message_type: Option<String>, // 可选的原始消息类型，用于帮助客户端关联错误来源
@@ -463,4 +658,95 @@ async fn send_error_response(
             );
         }
     }
+}
+
+// 提取的辅助函数，用于处理业务Action并通知伙伴
+async fn process_business_action_and_notify_partners(
+    client_session: &Arc<ClientSession>,
+    group_id: &str,
+    updater_role: common_models::enums::ClientRole,
+    action_payload: common_models::ws_payloads::BusinessActionPayload,
+    task_state_manager: &Arc<TaskStateManager>,
+    connection_manager: &Arc<ConnectionManager>,
+    message_type_for_log: &str, // 用于日志记录原始消息类型
+) {
+    match task_state_manager.update_state_and_get_updated(group_id, updater_role, action_payload).await {
+        Some(updated_task_state) => {
+            info!(
+                "[消息路由 - {}] group_id '{}' 的 TaskDebugState 已更新。版本: {}. 准备通知伙伴客户端。", 
+                message_type_for_log, group_id, updated_task_state.version
+            );
+            if let Some(group_guard) = connection_manager.get_group(group_id).await {
+                let mut recipients_found = false;
+                let partner_sessions_to_notify: Vec<Arc<ClientSession>> = match updater_role {
+                    common_models::enums::ClientRole::ControlCenter => group_guard.on_site_mobile_client.iter().cloned().collect(),
+                    common_models::enums::ClientRole::OnSiteMobile => group_guard.control_center_client.iter().cloned().collect(),
+                    _ => Vec::new(),
+                };
+
+                for partner_session in partner_sessions_to_notify {
+                    if partner_session.client_id != client_session.client_id {
+                        recipients_found = true;
+                        match WsMessage::new(ws_payloads::TASK_STATE_UPDATE_MESSAGE_TYPE.to_string(), &updated_task_state) {
+                            Ok(state_update_msg) => {
+                                if let Err(e) = partner_session.sender.send(state_update_msg).await {
+                                    error!(
+                                        "[消息路由 - {}] 向伙伴客户端 {} (组 '{}') 发送 TaskStateUpdate 失败: {}",
+                                        message_type_for_log, partner_session.client_id, group_id, e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "[消息路由 - {}] 为伙伴客户端 {} (组 '{}') 创建 TaskStateUpdate 消息失败: {}",
+                                    message_type_for_log, partner_session.client_id, group_id, e
+                                );
+                            }
+                        }
+                    }
+                }
+                if recipients_found {
+                    info!("[消息路由 - {}] 已向组 '{}' 内的伙伴客户端发送 TaskStateUpdate。", message_type_for_log, group_id);
+                } else {
+                    info!("[消息路由 - {}] 组 '{}' 内没有需要通知的伙伴客户端。", message_type_for_log, group_id);
+                }
+            } else {
+                warn!("[消息路由 - {}] 未找到 group_id '{}' 对应的组信息，无法通知伙伴。", message_type_for_log, group_id);
+            }
+        }
+        None => {
+            info!(
+                "[消息路由 - {}] group_id '{}' 的 TaskDebugState 未发生变化，无需通知伙伴。",
+                message_type_for_log, group_id
+            );
+        }
+    }
+}
+
+// 辅助函数，用于发送未注册错误
+async fn send_unregistered_error(client_session: &Arc<ClientSession>, original_message_type: &str) {
+    warn!(
+        "[消息路由] 客户端 {} (地址: {}): 尝试在未注册或未分配角色的情况下发送 {}。忽略。",
+        client_session.client_id, client_session.addr, original_message_type
+    );
+    send_error_response(
+        client_session,
+        Some(original_message_type.to_string()),
+        "客户端未注册到有效调试组或角色未知，无法处理此业务请求。".to_string(),
+    )
+    .await;
+}
+
+// 辅助函数，用于发送Payload解析错误
+async fn send_payload_parse_error(client_session: &Arc<ClientSession>, original_message_type: &str, error_text: &str, original_payload: &str) {
+    warn!(
+        "[消息路由] 客户端 {} (地址: {}): 解析 {} 请求的负载失败: {}. 原始JSON负载: '{}'",
+        client_session.client_id, client_session.addr, original_message_type, error_text, original_payload
+    );
+    send_error_response(
+        client_session,
+        Some(original_message_type.to_string()),
+        format!("{} 请求的负载格式无效: {}.", original_message_type, error_text),
+    )
+    .await;
 } 
