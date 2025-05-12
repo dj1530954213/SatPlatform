@@ -422,12 +422,13 @@ impl WsService {
                                     }
                                 }
                             }
-                            Some(None) => { // 情况 3: 内部 Option 是 None - 理论上不应由当前 select! 逻辑产生
-                                error!(
-                                    "[WebSocket服务层-接收循环 {}] UNEXPECTED: tokio::select! 产生了 Some(None) 结果。这表示 receive_fut 可能返回了 Option<T> 而不是 Result<T,E>，或者 select! 行为异常。",
+                            Some(None) => { // 情况 3: receive_message 返回 None，表示对端关闭连接
+                                info!(
+                                    "[WebSocket服务层-接收循环 {}] 检测到 WebSocket 连接已由对端关闭 (receive_message 返回 None，select! 结果为 Some(None))。接收与处理循环即将终止。",
                                     client_session_clone_for_router.client_id
                                 );
-                                // 也许应该关闭连接？
+                                client_session_clone_for_router.connection_should_close.store(true, std::sync::atomic::Ordering::SeqCst); // 确保逻辑关闭标志被设置
+                                break; // 明确退出接收循环
                             }
                             None => { // 情况 4: 超时 (外部 Option 是 None)
                                 debug!(

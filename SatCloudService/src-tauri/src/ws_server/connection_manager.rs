@@ -340,37 +340,34 @@ impl ConnectionManager {
 
                         if is_group_now_empty {
                             info!(
-                                "[连接管理器::组处理] 组 '{}' (任务ID: '{}') 在客户端 {} 移除后已变为空。准备从管理器中移除该组并清理其任务状态...",
+                                "[连接管理器::组处理] 组 '{}' (任务ID: '{}') 在客户端 {} 移除后已变为空。即将调用 TaskStateManager 清理其任务状态...",
                                 group_id_for_cleanup, task_id_for_cleanup, client_id
                             );
-                            // 在释放组的写锁后，再从 self.groups 中移除该组。
-                            // 这里需要先 drop group 写锁。
-                        }
-                        
-                        // 在这里显式释放写锁，因为后续的 self.groups.remove 和 self.task_state_manager 调用不应持有单个组的锁。
-                        drop(group); // group 的生命周期在此结束, group 在此之后不能再被直接使用
 
-                        if is_group_now_empty {
-                            // 从 ConnectionManager 的 `groups` 映射中移除这个空组。
-                            if self.groups.remove(&group_id_for_cleanup).is_some() { // 使用克隆的 group_id
-                                info!(
-                                    "[连接管理器] 空组 '{}' (原任务ID: '{}') 已成功从组管理器中移除。",
-                                    group_id_for_cleanup, task_id_for_cleanup // 使用克隆的ID
-                                );
-                                // P3.3.1: 通知 TaskStateManager 清理与此组关联的任务状态。
-                                self.task_state_manager.remove_task_state(&group_id_for_cleanup).await; // 使用克隆的 group_id
-                                info!(
-                                    "[连接管理器] 已为已移除的空组 '{}' (原任务ID: '{}') 调用 TaskStateManager::remove_task_state。",
-                                    group_id_for_cleanup, task_id_for_cleanup // 使用克隆的ID
+                            // TaskStateManager 是 ConnectionManager 的一个成员 (Arc<TaskStateManager>)，因此它总是存在的。
+                            // 直接使用 self.task_state_manager 来调用其方法。
+                            if let Err(e) = self.task_state_manager.remove_task_state(&group_id_for_cleanup).await {
+                                error!(
+                                    "[连接管理器::组处理] 调用 TaskStateManager::remove_task_state 为组 '{}' 清理任务状态时发生错误: {:?}",
+                                    group_id_for_cleanup, e
                                 );
                             } else {
-                                // 这通常不应发生，因为我们之前还持有对 group_entry 的引用。
-                                warn!(
-                                    "[连接管理器] 尝试移除空组 '{}' 时发现其已不存在于组管理器中。可能存在并发移除的情况。",
-                                    group_id_for_cleanup // 使用克隆的 group_id
+                                info!(
+                                    "[连接管理器::组处理] 已成功调用 TaskStateManager::remove_task_state 为组 '{}' 清理任务状态。",
+                                    group_id_for_cleanup
                                 );
                             }
+
+                            // 从 ConnectionManager 内部移除空组
+                            if self.groups.remove(&group_id_for_cleanup).is_some() {
+                                info!("[连接管理器::组处理] 空组 '{}' 已成功从 ConnectionManager 中移除。", group_id_for_cleanup);
+                            } else {
+                                warn!("[连接管理器::组处理] 尝试从 ConnectionManager 中移除空组 '{}'，但未找到该组。", group_id_for_cleanup);
+                            }
                         }
+
+                        // 在这里显式释放写锁，因为后续的 self.groups.remove 和 self.task_state_manager 调用不应持有单个组的锁。
+                        drop(group); // group 的生命周期在此结束, group 在此之后不能再被直接使用
 
                     } else { // group_id 存在于 client_session 中，但在 self.groups 中未找到该组
                         warn!(

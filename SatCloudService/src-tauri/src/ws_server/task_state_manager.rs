@@ -142,28 +142,31 @@ impl TaskStateManager {
         }
     }
 
-    /// 移除指定 `group_id` 的任务状态。
+    /// 此方法从内部的 `active_task_states` 集合中异步移除与指定 `group_id` 关联的 `TaskDebugState`。
+    /// 如果成功找到并移除了状态，或者即使未找到（也认为操作已"完成"），则返回 `Ok(())`。
+    /// 如果在尝试移除过程中遇到内部错误（例如，锁获取问题，尽管当前实现不太可能），则返回 `Err(String)`。
     ///
-    /// 当一个调试任务组解散时调用，用于清理资源。
+    /// # 参数
+    /// * `group_id`: `&str` - 需要移除其任务状态的组的唯一ID。
     ///
-    /// # Arguments
-    /// * `group_id` - 要移除的任务状态所属的组ID。
-    pub async fn remove_task_state(&self, group_id: &str) {
-        info!("请求移除 group_id '{}' 的任务状态。", group_id);
-        match self.active_task_states.remove(group_id) {
-            Some((_removed_group_id, removed_task_state_arc)) => {
-                let task_id_for_log = removed_task_state_arc.read().await.task_id.clone();
-                info!(
-                    "已成功移除 group_id '{}' (关联 task_id '{}') 的任务状态。",
-                    group_id, task_id_for_log
-                );
-            }
-            None => {
-                warn!(
-                    "尝试移除不存在的 group_id '{}' 的任务状态。可能已被移除或从未初始化。",
-                    group_id
-                );
-            }
+    /// # 返回值
+    /// * `Result<(), String>`: 操作成功时返回 `Ok(())`，否则返回包含错误描述的 `Err(String)`。
+    pub async fn remove_task_state(&self, group_id: &str) -> Result<(), String> {
+        info!("[任务状态管理器] 尝试为 group_id '{}' 移除任务状态...", group_id);
+        // DashMap 的 remove 方法返回 Option<(K, V)>，这里是 Option<(String, Arc<RwLock<TaskDebugState>>)>
+        let removed_entry = self.active_task_states.remove(group_id);
+
+        if removed_entry.is_some() {
+            info!("[任务状态管理器] 任务状态已成功为 group_id '{}' 移除。", group_id);
+            Ok(())
+        } else {
+            warn!(
+                "[任务状态管理器] 尝试为 group_id '{}' 移除任务状态，但未找到该组的状态。这可能发生在组已被清理或从未正确初始化任务状态的情况下。",
+                group_id
+            );
+            // 即使未找到，也认为"移除操作"已尝试过且逻辑上完成（对于调用者而言，该状态确实不存在了）。
+            // 如果需要区分"成功移除"和"未找到"，可以改变返回类型或错误信息。
+            Ok(())
         }
     }
 

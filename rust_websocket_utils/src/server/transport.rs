@@ -13,8 +13,13 @@ use log::{debug, error, info};
 // use std::net::SocketAddr; // 已注释
 use tokio::net::TcpStream; // 只导入 TcpStream，因为 TcpListener 是通过完整路径使用的
 use tokio_tungstenite::{
-    accept_async,
-    tungstenite::{protocol::Message, Error as TungsteniteError},
+    accept_hdr_async,
+    tungstenite::{
+        handshake::server::{Request, Response, ErrorResponse},
+        http::HeaderValue,
+        protocol::Message,
+        Error as TungsteniteError
+    },
     WebSocketStream,
 };
 
@@ -64,8 +69,19 @@ where
     while let Ok((stream, client_addr)) = listener.accept().await {
         info!("新的 TCP 连接来自: {}", client_addr);
         let mut on_new_connection_for_task = on_new_connection.clone();
-        tokio::spawn(async move { 
-            match accept_async(stream).await {
+        tokio::spawn(async move {
+            let callback = |req: &Request, mut response: Response|
+                -> Result<Response, ErrorResponse>
+            {
+                info!("[握手回调] 收到来自 {} 的新 WebSocket 握手请求，路径: {}", client_addr, req.uri().path());
+                response.headers_mut().append(
+                    "Access-Control-Allow-Origin",
+                    HeaderValue::from_static("*")
+                );
+                Ok(response)
+            };
+
+            match accept_hdr_async(stream, callback).await {
                 Ok(ws_stream) => {
                     info!("WebSocket 连接已建立: {}", client_addr);
                     let (ws_sender, ws_receiver) = ws_stream.split();

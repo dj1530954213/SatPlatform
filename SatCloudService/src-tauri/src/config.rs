@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use tauri::Manager;
 
 /// WebSocket 服务的默认主机地址
-pub const DEFAULT_WS_HOST: &str = "127.0.0.1";
+pub const DEFAULT_WS_HOST: &str = "0.0.0.0";
 /// WebSocket 服务的默认端口号 (注意：端口从常用的 8080 修改为 8088 以避免冲突)
 pub const DEFAULT_WS_PORT: u16 = 8088;
 
