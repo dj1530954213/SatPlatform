@@ -22,6 +22,14 @@ use rust_websocket_utils::message::WsMessage; // 从 `rust_websocket_utils` 导�
 use common_models; // 导入 `common_models` crate，用于访问共享的数据模型，例如 `EchoPayload` 和消息类型常量。
 use chrono::Utc; // `chrono` crate，用于获取当前的 UTC 时间戳。
 use uuid::Uuid; // `uuid` crate，用于生成唯一的 UUID (通用唯一标识符)，例如为 `WsMessage` 生成 `message_id`。
+use tauri::Manager; // 用于获取 AppHandle 和访问状态
+use common_models::{
+    enums::ClientRole,
+    ws_messages::WsMessage, // 假设 WsMessage 在 common_models::ws_messages 中定义
+    ws_payloads::{RegisterPayload, REGISTER_MESSAGE_TYPE},
+};
+// 确保 WsRequest 和 AppState 的路径正确
+use crate::ws_client::services::{AppState, WsRequest}; // 假设 WsService 实例在 AppState 中
 
 /// Tauri 命令：连接到云端 WebSocket 服务器。
 ///
@@ -197,6 +205,83 @@ pub async fn send_ws_echo(
             let error_message = format!("命令 'send_ws_echo': 发送 Echo (回声) 消息时发生错误: {}", e);
             error!("{}", error_message); // 记录详细错误日志
             Err(error_message) // 向前端返回错误信息
+        }
+    }
+}
+
+/// Tauri 命令，用于客户端向云端发起注册请求，并关联一个特定的任务。
+///
+/// # Arguments
+/// * `app_handle` - Tauri 应用句柄，用于访问共享状态（如 WsService）。
+/// * `group_id` - 用户希望加入或创建的调试组的ID。
+/// * `task_id` - 当前要进行的调试任务的唯一标识。
+///
+/// # Returns
+/// * `Result<(), String>` - 操作成功则返回 Ok(()), 失败则返回包含错误信息的 Err。
+#[tauri::command]
+pub async fn register_client_with_task(
+    app_handle: tauri::AppHandle,
+    group_id: String,
+    task_id: String,
+) -> Result<(), String> {
+    info!(
+        "Tauri 命令 'register_client_with_task' 被调用, group_id: {}, task_id: {}",
+        group_id, task_id
+    );
+
+    // 构建 RegisterPayload
+    let register_payload = RegisterPayload {
+        group_id: group_id.clone(),
+        role: ClientRole::ControlCenter, // 对于 SatControlCenter，角色固定为 ControlCenter
+        task_id: task_id.clone(),
+    };
+
+    // 序列化 RegisterPayload 为 JSON 字符串
+    let serialized_payload = match serde_json::to_string(&register_payload) {
+        Ok(json_str) => json_str,
+        Err(e) => {
+            error!("序列化 RegisterPayload 失败: {}", e);
+            return Err(format!("构建注册请求失败 (序列化错误): {}", e));
+        }
+    };
+
+    // 创建 WsMessage
+    // 假设 WsMessage 结构体包含 message_type 和 payload。
+    // 如果 WsMessage 还需要 correlation_id 或 timestamp，需要在这里生成并填充。
+    let ws_message = WsMessage {
+        message_type: REGISTER_MESSAGE_TYPE.to_string(),
+        payload: serialized_payload,
+        // correlation_id: Some(uuid::Uuid::new_v4().to_string()), // 示例：如果需要
+        // timestamp: Some(chrono::Utc::now().to_rfc3339()),      // 示例：如果需要
+    };
+
+    // 从 AppState 获取 WsService 实例的引用
+    let app_state = match app_handle.try_state::<AppState>() {
+        Some(state) => state,
+        None => {
+            error!("无法从 Tauri AppHandle 获取 AppState。WsService 可能未正确初始化。");
+            return Err("内部服务器错误: WebSocket 服务状态不可用".to_string());
+        }
+    };
+
+    // 在调用 submit_request 之前，先调用 WsService 的 set_current_task_context
+    // 这样 WsService 在处理 RegisterResponse 时，可以知道 task_id
+    app_state.ws_service.set_current_task_context(group_id.clone(), task_id.clone()).await;
+    info!("WsService 上下文已设置: group_id={}, task_id={}", group_id, task_id);
+
+
+    // 通过 WsService 发送消息
+    match app_state.ws_service.submit_request(WsRequest::SendMessage(ws_message)).await {
+        Ok(_) => {
+            info!(
+                "已请求 WsService 发送 'Register' 消息, group_id: {}, task_id: {}",
+                group_id, task_id
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!("请求 WsService 发送 'Register' 消息失败: {}", e);
+            Err(format!("发送注册消息失败: {}", e))
         }
     }
 }

@@ -17,6 +17,8 @@ use chrono::Utc;
 use uuid::Uuid;
 use common_models::ws_payloads::{RegisterPayload, REGISTER_MESSAGE_TYPE};
 use common_models::enums::ClientRole;
+use tauri::Manager;
+use crate::ws_client::services::{AppState, WsRequest};
 
 /// 连接到云端 WebSocket 服务器。
 ///
@@ -182,7 +184,7 @@ pub async fn send_ws_echo(
 /// 此命令用于客户端（如此处的现场端）向云端表明身份、期望加入的组以及关联的调试任务。
 ///
 /// # 参数
-/// * `state`: `WebSocketClientService` 的共享状态。
+/// * `app_handle`: Tauri 应用句柄。
 /// * `group_id`: 客户端希望加入或创建的调试组的唯一标识符。
 /// * `task_id`: 与此调试会话关联的具体任务的唯一标识符。
 ///
@@ -191,64 +193,57 @@ pub async fn send_ws_echo(
 ///   实际的注册成功与否通过后续的 "RegisterResponse" 事件进行通知。
 #[tauri::command]
 pub async fn register_client_with_task(
-    state: State<'_, Arc<WebSocketClientService>>,
+    app_handle: tauri::AppHandle,
     group_id: String,
     task_id: String,
 ) -> Result<(), String> {
     info!(
-        "[SatOnSiteMobile] Tauri 命令 'register_client_with_task' 被调用。GroupID: "{}", TaskID: "{}"",
-        group_id,
-        task_id
+        "Tauri 命令 'register_client_with_task' (SatOnSiteMobile) 被调用, group_id: {}, task_id: {}",
+        group_id, task_id
     );
-    let ws_service = state.inner().clone();
 
-    // 1. 构建 RegisterPayload
-    // 对于现场端，ClientRole 固定为 OnSiteMobile
     let register_payload = RegisterPayload {
-        group_id: group_id.clone(), // 克隆以用于 payload
-        task_id: task_id.clone(),   // 克隆以用于 payload
-        role: ClientRole::OnSiteMobile,
+        group_id: group_id.clone(),
+        role: ClientRole::OnSiteMobile, // <--- 角色设置为 OnSiteMobile
+        task_id: task_id.clone(),
     };
 
-    // 2. 将 RegisterPayload 序列化为 JSON 字符串
-    let payload_json = match serde_json::to_string(&register_payload) {
-        Ok(json) => json,
+    let serialized_payload = match serde_json::to_string(&register_payload) {
+        Ok(json_str) => json_str,
         Err(e) => {
-            let err_msg = format!("[SatOnSiteMobile] 序列化 RegisterPayload 失败: {}", e);
-            error!("{}", err_msg);
-            return Err(err_msg); // 返回中文错误
+            error!("序列化 RegisterPayload (SatOnSiteMobile) 失败: {}", e);
+            return Err(format!("构建注册请求失败: {}", e));
         }
     };
 
-    // 3. 构建 WsMessage
-    // 使用 WsMessage::new() 构造函数，如果可用且符合需求
-    let ws_message = WsMessage::new(
-        REGISTER_MESSAGE_TYPE.to_string(),
-        payload_json,
-        None, // client_id 通常在注册时由客户端发往服务器时为 None
-        Some(group_id.clone()), // 可以在 WsMessage 层面也传递 group_id，根据服务端 WsMessage 定义决定
-        None, // target_client_id 在注册消息中通常为 None
-    );
-    // 或者手动构造（如果 WsMessage::new 不完全适用或为了明确所有权）
-    // let ws_message = WsMessage {
-    //     message_id: Uuid::new_v4().to_string(),
-    //     message_type: REGISTER_MESSAGE_TYPE.to_string(),
-    //     payload: payload_json,
-    //     timestamp: Utc::now().timestamp_millis(),
-    //     // 根据 WsMessage 定义，其他字段如 client_id, group_id, target_client_id 可设为 None 或按需设置
-    // };
+    let ws_message = WsMessage {
+        message_type: REGISTER_MESSAGE_TYPE.to_string(),
+        payload: serialized_payload,
+    };
 
+    let app_state = match app_handle.try_state::<AppState>() {
+        Some(state) => state,
+        None => {
+            error!("无法从 Tauri AppHandle 获取 AppState (SatOnSiteMobile)。");
+            return Err("内部服务器错误: WebSocket 服务状态不可用".to_string());
+        }
+    };
+    
+    // 设置 WsService 上下文
+    app_state.ws_service.set_current_task_context(group_id.clone(), task_id.clone()).await;
+    info!("WsService 上下文已设置 (SatOnSiteMobile): group_id={}, task_id={}", group_id, task_id);
 
-    // 4. 发送 WsMessage
-    match ws_service.send_ws_message(ws_message).await {
+    match app_state.ws_service.submit_request(WsRequest::SendMessage(ws_message)).await {
         Ok(_) => {
-            info!("[SatOnSiteMobile] Register消息 (GroupID: "{}", TaskID: "{}") 已成功发送到 WebSocket 服务。", group_id, task_id);
+            info!(
+                "已请求 WsService 发送 'Register' 消息 (SatOnSiteMobile), group_id: {}, task_id: {}",
+                group_id, task_id
+            );
             Ok(())
         }
         Err(e) => {
-            let err_msg = format!("[SatOnSiteMobile] 发送 Register 消息失败: {}", e);
-            error!("{}", err_msg);
-            Err(err_msg) // 返回中文错误
+            error!("请求 WsService 发送 'Register' 消息 (SatOnSiteMobile) 失败: {}", e);
+            Err(format!("发送注册消息失败: {}", e))
         }
     }
 }

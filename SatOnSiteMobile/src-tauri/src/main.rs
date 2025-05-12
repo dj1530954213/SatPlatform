@@ -8,59 +8,53 @@ mod ws_client;  // WebSocket 客户端服务模块 (P2.1.1 - 现场端)
 mod commands;   // Tauri 命令定义模块 (P2.1.1 - 现场端)
 
 use std::sync::Arc;
-use ws_client::WebSocketClientService; // 引入 WebSocket 客户端服务
-use log::{info, error}; // 引入日志宏
+use ws_client::services::{AppState, setup_and_start_ws_service, WsRequest}; 
+use log::{info, error, warn, LevelFilter};
 use tauri::Manager; // 引入 tauri::Manager trait 以使用 app.manage()
+use env_logger;
 
 /// `SatOnSiteMobile` (现场端) 应用程序的主入口函数。
 fn main() {
-    // 初始化日志记录器
-    // 如果 RUST_LOG 环境变量未设置，则默认为 "debug" 级别。
-    // 这允许在运行时通过设置 RUST_LOG 环境变量来调整日志输出的详细程度，
-    // 例如 RUST_LOG=info cargo tauri dev 只会显示 info 及更高级别的日志。
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "debug"); 
-    }
-    env_logger::init(); // 初始化 env_logger
-    info!("[SatOnSiteMobile] 现场端应用程序启动中...");
+    env_logger::Builder::new()
+        .filter_level(LevelFilter::Info)
+        .filter_module("SatOnSiteMobile", LevelFilter::Debug)
+        .filter_module("common_models", LevelFilter::Debug)
+        .try_init()
+        .expect("初始化 env_logger 失败 (SatOnSiteMobile)");
 
-    // 构建并运行 Tauri 应用程序实例
+    info!("SatOnSiteMobile 应用启动中...");
+
     tauri::Builder::default()
         .setup(|app| {
-            // 此闭包在 Tauri 应用构建完成但在任何窗口创建之前执行。
-            // 非常适合用于初始化后端服务和设置共享状态。
-            info!("[SatOnSiteMobile] Tauri 应用 Setup 阶段: 正在初始化 WebSocketClientService...");
+            info!("Tauri setup 钩子执行 (SatOnSiteMobile)...");
+            let app_handle = app.handle();
+
+            let ws_url = String::from("ws://127.0.0.1:8088/ws_debug"); 
+            info!("WebSocket 服务 URL 配置为: {} (SatOnSiteMobile)", ws_url);
+
+            let ws_service_arc = setup_and_start_ws_service(app_handle.clone(), ws_url);
             
-            // 获取应用句柄的克隆，以便传递给服务
-            let app_handle_clone = app.handle().clone();
-            
-            // 创建 WebSocketClientService 实例，并使用 Arc 进行共享
-            let ws_service = Arc::new(WebSocketClientService::new(app_handle_clone));
-            
-            // 将 WebSocketClientService 实例注入到 Tauri 的状态管理器中，
-            // 这样它就可以在 Tauri 命令中通过 `State<Arc<WebSocketClientService>>` 被访问。
-            app.manage(ws_service.clone()); 
-            // 保留 .clone() 是一个好习惯，以防 ws_service 的所有权后续仍需在此作用域内使用，
-            // 尽管在这里它之后没有被直接使用。
-            
-            info!("[SatOnSiteMobile] WebSocketClientService 已成功创建并注入到 Tauri State 管理。");
+            app.manage(AppState { ws_service: ws_service_arc.clone() });
+            info!("AppState (包含 WsService) 已放入 Tauri 状态管理 (SatOnSiteMobile)。");
+
+            info!("Tauri setup 钩子执行完毕 (SatOnSiteMobile)。");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // 注册所有需要从前端调用的 Tauri 命令
-            // 这些命令定义在 `commands` 模块的相应子模块中 (如此处的 `general_cmds`)
-            commands::general_cmds::connect_to_cloud,           // 连接到云端 WebSocket
-            commands::general_cmds::disconnect_from_cloud,      // 从云端 WebSocket 断开
-            commands::general_cmds::check_ws_connection_status, // 检查 WebSocket 连接状态
-            commands::general_cmds::send_ws_echo,               // 发送 Echo 测试消息
-            commands::general_cmds::register_client_with_task,  // 注册客户端并关联任务 (P4.1.1)
-            // 注意: 如果在 `commands::general_cmds.rs` 中未定义某个命令 (例如，由于从 SatControlCenter 复制时遗漏)，
-            // 则此处会导致编译错误。这有助于在编译阶段发现命令注册问题。
+            commands::general_cmds::register_client_with_task,
+            // 其他 SatOnSiteMobile 可能需要的命令
         ])
-        .run(tauri::generate_context!())
-        .expect("错误：SatOnSiteMobile 现场端应用程序运行失败，请检查日志获取更多信息。");
-    
-    // 这条日志通常在应用正常关闭（例如，用户关闭最后一个窗口）时不会执行，
-    // 因为 .run() 方法是阻塞的，直到应用完全退出。
-    // info!("[SatOnSiteMobile] 现场端应用程序已关闭。"); 
+        .build(tauri::generate_context!())
+        .expect("构建 Tauri 应用失败 (SatOnSiteMobile)。")
+        .run(|_app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                info!("Tauri RunEvent: ExitRequested (SatOnSiteMobile).");
+                api.prevent_exit();
+            }
+            tauri::RunEvent::Exit => {
+                info!("Tauri RunEvent: 应用即将退出 (SatOnSiteMobile)。");
+            }
+            _ => {}
+        });
+    info!("Tauri 应用 run 方法已调用 (SatOnSiteMobile)。");
 }
