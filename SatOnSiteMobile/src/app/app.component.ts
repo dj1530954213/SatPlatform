@@ -84,11 +84,13 @@ export class AppComponent implements OnInit, OnDestroy {
 
     if (!this.unlistenRegistrationStatus) {
       try {
-        this.unlistenRegistrationStatus = await listen<WsRegistrationStatusEventPayload>('ws_registration_status_event', (event) => {
+        this.unlistenRegistrationStatus = await listen<{ success: boolean; message?: string | null; assigned_client_id?: string | null; group_id?: string | null; task_id?: string | null; }>('ws_registration_status_event', (event) => {
           console.log('[SatOnSiteMobile] 接收到 Tauri 事件 "ws_registration_status_event":', event.payload);
-          this.registrationStatusMessage = event.payload.success
-            ? `注册成功 (组: ${event.payload.group_id}, 任务: ${event.payload.task_id})`
-            : `注册失败: ${event.payload.message || '未知错误'}`;
+          if (event.payload.success) {
+            this.registrationStatusMessage = `注册成功 (分配ID: ${event.payload.assigned_client_id || '未分配'}, 组: ${event.payload.group_id || 'N/A'}, 任务: ${event.payload.task_id || 'N/A'})`;
+          } else {
+            this.registrationStatusMessage = `注册失败: ${event.payload.message || '未知错误'}`;
+          }
           this.cdr.detectChanges();
         });
         console.log('[SatOnSiteMobile] 成功监听 "ws_registration_status_event" 事件。');
@@ -185,18 +187,20 @@ export class AppComponent implements OnInit, OnDestroy {
   registerClient() {
     if (!this.groupId || !this.taskId) {
       this.registrationStatusMessage = '请输入组ID和任务ID';
+      this.cdr.detectChanges();
       return;
     }
+    this.registrationStatusMessage = '正在注册...';
+    this.cdr.detectChanges();
+
     console.log(`[SatOnSiteMobile] 调用 Tauri 命令 register_client_with_task, GroupID: ${this.groupId}, TaskID: ${this.taskId}`);
     invoke('register_client_with_task', { groupId: this.groupId, taskId: this.taskId })
       .then(() => {
-        this.registrationStatusMessage = '注册请求已发送...';
-        console.log('[SatOnSiteMobile] register_client_with_task 命令调用成功');
-        this.cdr.detectChanges();
+        console.log('[SatOnSiteMobile] register_client_with_task 命令调用成功 (等待事件反馈)');
       })
       .catch(error => {
         console.error('[SatOnSiteMobile] register_client_with_task 命令调用失败:', error);
-        this.registrationStatusMessage = `注册命令失败: ${error}`;
+        this.registrationStatusMessage = `注册命令发送失败: ${error}`;
         this.cdr.detectChanges();
       });
   }

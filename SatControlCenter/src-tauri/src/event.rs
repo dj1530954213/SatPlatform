@@ -11,8 +11,7 @@
 //!   同时也会派生 `Clone` 和 `Debug` 以方便使用。
 
 use serde::{Deserialize, Serialize}; // 引入 Serialize trait，用于将 Rust 结构体序列化为 JSON 等格式，以便在 Tauri 事件中传递给前端。
-use common_models::{ClientRole, TaskDebugState};
-use uuid::Uuid;
+use common_models::{TaskDebugState};
 
 // --- 云端 WebSocket 连接状态相关事件名称常量 --- 
 
@@ -111,17 +110,21 @@ pub const ECHO_RESPONSE_EVENT: &str = "echo_response_event";
 /// 当 WebSocket 客户端尝试向云端注册并收到响应时，由后端服务发出此事件，
 /// 通知前端注册操作的结果。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsRegistrationStatusEvent {
+pub struct WsRegistrationStatusEventPayload {
     /// 指示注册是否成功。
     pub success: bool,
     /// 可选的附加信息，例如成功消息或失败原因。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// 客户端尝试注册或已成功注册到的组 ID。
-    pub group_id: String,
-    /// 如果注册成功，服务器分配给此客户端的唯一ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assigned_client_id: Option<Uuid>,
+    /// 客户端尝试注册或已成功注册到的组 ID。改为 Option<String> 以匹配 service.rs 用法。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// 关联的任务 ID。新增字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// 如果注册成功，服务器分配给此客户端的唯一ID (UUID 字符串)。改为 Option<String>。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_client_id: Option<String>,
 }
 
 pub const WS_REGISTRATION_STATUS_EVENT: &str = "ws_registration_status";
@@ -131,15 +134,11 @@ pub const WS_REGISTRATION_STATUS_EVENT: &str = "ws_registration_status";
 /// 当云端通知有伙伴（例如现场端）上线或下线时，由后端服务发出此事件，
 /// 通知前端伙伴的状态变化。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsPartnerStatusEvent {
-    /// 发生状态变化的伙伴的角色。
-    pub partner_role: ClientRole,
-    /// 发生状态变化的伙伴的客户端 ID。
-    pub partner_client_id: Uuid,
+pub struct WsPartnerStatusEventPayload {
+    /// 发生状态变化的伙伴的角色 (字符串形式)。
+    pub partner_role: String,
     /// 指示伙伴是否在线 (true 表示上线/加入组，false 表示下线/离开组)。
     pub is_online: bool,
-    /// 相关的组 ID。
-    pub group_id: String,
 }
 
 pub const WS_PARTNER_STATUS_EVENT: &str = "ws_partner_status";
@@ -149,7 +148,7 @@ pub const WS_PARTNER_STATUS_EVENT: &str = "ws_partner_status";
 /// 当 `ws_client::WebSocketClientService` 从云端收到 `TaskStateUpdate` 消息并更新了
 /// 本地缓存的 `TaskDebugState` 后，发出此事件，将最新的完整状态通知给前端。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LocalTaskStateUpdatedEvent {
+pub struct LocalTaskStateUpdatedEventPayload {
     /// 从云端接收到的、最新的完整任务调试状态。
     pub new_state: TaskDebugState,
 }
@@ -163,7 +162,7 @@ pub const LOCAL_TASK_STATE_UPDATED_EVENT: &str = "local_task_state_updated";
 /// 当 `ws_client::WebSocketClientService` 收到来自云端的明确错误响应消息
 /// (例如 `ErrorResponse` 类型) 时，可以发出此事件通知前端。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsServerErrorEvent {
+pub struct WsServerErrorEventPayload {
     /// 原始导致错误的请求消息类型（如果可用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_message_type: Option<String>,

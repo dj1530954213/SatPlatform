@@ -52,7 +52,11 @@ fn main() {
         .run(|_app_handle, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
                 info!("Tauri RunEvent: ExitRequested (SatOnSiteMobile).");
-                api.prevent_exit();
+                // api.prevent_exit(); // 移除阻止退出，改为直接退出
+                // 如果有需要异步完成的清理工作，可以在这里执行，
+                // 但最终必须手动退出。
+                // 这里我们直接退出。
+                std::process::exit(0);
             }
             tauri::RunEvent::Exit => {
                 info!("Tauri RunEvent: 应用即将退出 (SatOnSiteMobile)。");

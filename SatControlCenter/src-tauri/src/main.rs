@@ -54,7 +54,8 @@ use std::sync::Arc; // 原子引用计数
 fn main() {
     // 初始化日志记录器 (例如使用 env_logger 或 tracing)
     // TODO: 根据项目规则和选择的日志库添加实际的初始化代码
-    env_logger::init(); // 示例：使用 env_logger
+    // env_logger::init(); // 示例：使用 env_logger (旧的)
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init(); // 修改为更灵活的初始化方式
     log::info!("SatControlCenter Tauri 后端启动中...");
 
     // 创建 WebSocket 客户端服务实例 (需要配置)

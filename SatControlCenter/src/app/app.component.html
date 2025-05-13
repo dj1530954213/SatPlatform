@@ -1,15 +1,16 @@
 <div>
-  <h1>SatControlCenter 控制面板</h1>
+  <h1>SatControlCenter 指挥中心</h1>
 
   <hr />
 
   <h2>1. WebSocket 连接</h2>
-  <button (click)="connect()">连接到云端 ({{ wsUrl }})</button>
-  <p><strong>连接状态:</strong> {{ (connectionStatus$ | async)?.connected ? '已连接 (Client ID: ' + ((connectionStatus$ | async)?.client_id ?? 'N/A') + ')' : ('未连接' + ((connectionStatus$ | async)?.error_message ? ' - 错误: ' + (connectionStatus$ | async)?.error_message : '')) }}</p>
+  <button (click)="connectToCloud()">连接到云端 (ws://127.0.0.1:8088)</button>
+  <button (click)="triggerReconnect()">手动触发重新连接</button>
+  <p><strong>连接状态:</strong> {{ connectionStatusMessage }}</p>
 
   <hr />
 
-  <h2>2. 客户端注册</h2>
+  <h2>2. 客户端注册 (指挥中心通常不注册自己)</h2>
   <div>
     <label for="groupId">组ID (GroupID): </label>
     <input id="groupId" type="text" [(ngModel)]="groupId" />
@@ -18,45 +19,35 @@
     <label for="taskId">任务ID (TaskID): </label>
     <input id="taskId" type="text" [(ngModel)]="taskId" />
   </div>
-  <button (click)="register()" [disabled]="!(connectionStatus$ | async)?.connected || !groupId || !taskId">注册客户端到组和任务</button>
-  <p><strong>注册状态:</strong> 
-    <ng-container *ngIf="registrationStatus$ | async as status">
-      {{ status.success ? '成功注册到组 ' + status.group_id + (status.assigned_client_id ? ' (分配 Client ID: ' + status.assigned_client_id + ')' : '') : ('注册失败: ' + (status.message ?? '未知错误')) }}
-    </ng-container>
-    <ng-container *ngIf="!(registrationStatus$ | async)">未注册</ng-container>
-  </p>
+  <button (click)="registerClient()" [disabled]="!groupId || !taskId">(示例) 发送注册命令 (通常由现场端执行)</button>
+  <p><strong>注册状态 (命令反馈/事件):</strong> {{ registrationStatusMessage }}</p>
 
   <hr />
 
   <h2>3. 伙伴客户端状态</h2>
-  <p><strong>伙伴状态:</strong> 
-    <ng-container *ngIf="partnerStatus$ | async as status">
-      伙伴 {{ status.partner_role }} ({{ status.partner_client_id }}) {{ status.is_online ? '已上线' : '已下线' }} (组: {{ status.group_id }})
-    </ng-container>
-    <ng-container *ngIf="!(partnerStatus$ | async)">伙伴状态未知</ng-container>
-  </p>
+  <p><strong>伙伴状态 (通过事件更新):</strong> {{ partnerStatusMessage }}</p>
 
   <hr />
 
   <h2>4. 任务调试状态 (TaskDebugState)</h2>
-  <p><strong>当前任务状态 (JSON):</strong></p>
-  <pre>{{ taskState$ | async | json }}</pre>
+  <p><strong>当前任务状态 (JSON, 通过事件更新):</strong></p>
+  <pre>{{ taskStateString }}</pre>
 
   <hr />
 
-  <h2>Echo 测试 (P2.2.1)</h2>
+  <h2>Echo 测试</h2>
   <div>
     <label for="echoInput">要发送的内容: </label>
     <input id="echoInput" type="text" [(ngModel)]="echoInput" />
-    <button (click)="sendEchoTest()" [disabled]="!(connectionStatus$ | async)?.connected || !echoInput">发送 Echo</button>
+    <button (click)="sendEcho()" [disabled]="!echoInput">发送 Echo</button>
   </div>
   <p><strong>Echo 回复:</strong> {{ echoResponseMessage }}</p>
 
   <hr />
-  <!-- P4.2.1 业务操作按钮区域 - 占位符 -->
+
   <h2>5. 业务操作 (占位符)</h2>
-  <p><em>此处将添加用于触发具体业务操作（如预检查、单体测试步骤等）的按钮和表单。</em></p>
-  <button disabled>(示例) 发送预检查项更新</button>
-  <button disabled>(示例) 发起单体测试步骤</button>
+  <p><em>此处将添加用于触发具体业务操作（如任务控制、参数下发等）的按钮和表单。</em></p>
+  <button disabled>(示例) 下发控制指令</button>
+  <button disabled>(示例) 查询现场状态</button>
 
 </div>

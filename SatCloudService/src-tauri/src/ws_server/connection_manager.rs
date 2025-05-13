@@ -428,22 +428,18 @@ impl ConnectionManager {
         client_session: Arc<ClientSession>,
         payload: RegisterPayload,
     ) -> Result<RegisterResponsePayload, RegisterResponsePayload> {
-        let client_id = client_session.client_id; // 获取客户端ID，用于日志和响应
-        let requested_role = payload.role.clone(); // 克隆请求的角色
-        let group_id = payload.group_id.clone();   // 克隆请求的组ID
-        let task_id = payload.task_id.clone();     // 克隆请求的任务ID (P3.1.1)
+        let client_id = client_session.client_id;
+        let requested_role = payload.role.clone();
+        let group_id = payload.group_id.clone();
+        let task_id = payload.task_id.clone();
 
         info!(
-            "[连接管理器::注册] 客户端 {} 请求加入组 '{}' (任务ID: '{}')，声明角色为: {:?}。",
+            "[CM::join_group START] Client {} req group '{}', task '{}', role {:?}.",
             client_id, group_id, task_id, requested_role
         );
 
-        // 验证 task_id 是否为空，如果为空则拒绝注册 (基本校验)
         if task_id.is_empty() {
-            warn!(
-                "[连接管理器::注册] 客户端 {} 尝试注册到组 '{}' 时提供的 task_id 为空。注册被拒绝。",
-                client_id, group_id
-            );
+            warn!("[CM::join_group EARLY_EXIT_A] task_id is empty for client {}, group '{}'. Registration rejected.", client_id, group_id);
             return Err(RegisterResponsePayload {
                 success: false,
                 message: Some("注册失败：必须提供有效的 task_id。".to_string()),
@@ -453,70 +449,96 @@ impl ConnectionManager {
             });
         }
 
-        // --- 步骤 1: 获取或创建组 ---
-        // 使用 DashMap 的 entry API 来原子性地获取或创建组。
-        // `or_try_insert_with` 在键不存在时尝试插入，如果插入的闭包返回Ok，则插入成功。
-        // 这里我们需要先判断组是否存在，如果不存在则创建新组，然后对组进行写操作。
-        // 如果组已存在，则直接获取写锁。
+        info!("[CM::join_group PRE_CONTAINS_KEY_CHECK] Group '{}', Task '{}'. About to check self.groups (len: {}).", group_id, task_id, self.groups.len());
+        let group_exists = self.groups.contains_key(&group_id);
+        info!("[CM::join_group POST_CONTAINS_KEY_CHECK] Group '{}', Task '{}'. group_exists = {}.", group_id, task_id, group_exists);
 
         let group_arc: Arc<RwLock<Group>>;
 
-        if !self.groups.contains_key(&group_id) {
-            info!(
-                "[连接管理器::注册] 组 '{}' (任务ID: '{}') 不存在，将尝试创建新组。",
-                group_id, task_id
-            );
+        if !group_exists {
+            info!("[CM::join_group CREATE_GROUP_BRANCH] Group '{}' (Task '{}') does not exist. Attempting to create.", group_id, task_id);
             let new_group = Group::new(group_id.clone(), task_id.clone());
             let new_group_arc = Arc::new(RwLock::new(new_group));
             
+            info!("[CM::join_group CREATE_GROUP_BRANCH] Group '{}' (Task '{}'). Attempting to insert into self.groups.", group_id, task_id);
             match self.groups.insert(group_id.clone(), Arc::clone(&new_group_arc)) {
-                None => { // 成功插入，这是新创建的组
+                None => {
                     info!(
-                        "[连接管理器::注册] 新组 '{}' (任务ID: '{}') 已成功创建并添加到管理器。",
+                        "[CM::join_group CREATE_GROUP_BRANCH] New group '{}' (Task '{}') successfully created and inserted.",
                         group_id, task_id
                     );
-                    // P3.3.1: 为新创建的组初始化任务状态
                     self.task_state_manager.init_task_state(group_id.clone(), task_id.clone()).await;
                     info!(
-                        "[连接管理器::注册] 已为新组 '{}' (任务ID: '{}') 调用 TaskStateManager::init_task_state。",
+                        "[CM::join_group CREATE_GROUP_BRANCH] Called init_task_state for new group '{}' (Task '{}').",
                         group_id, task_id
                     );
                     group_arc = new_group_arc;
                 }
-                Some(existing_group_arc) => { // 在我们检查和插入之间，另一个线程插入了
+                Some(existing_group_arc_concurrent) => {
                     info!(
-                        "[连接管理器::注册] 并发竞争：组 '{}' 在尝试插入时已被其他操作创建。使用已存在的组。",
-                        group_id
+                        "[CM::join_group CREATE_GROUP_BRANCH] Concurrent write: Group '{}' (Task '{}') was inserted by another thread. Using existing.",
+                        group_id, task_id
                     );
-                    group_arc = existing_group_arc; // 使用已存在的组
-                    let existing_group_guard = group_arc.read().await;
-                    if existing_group_guard.task_id != task_id {
+                    group_arc = existing_group_arc_concurrent;
+                    let existing_group_guard_concurrent = group_arc.read().await;
+                    if existing_group_guard_concurrent.task_id != task_id {
                         warn!(
-                            "[连接管理器::注册] 客户端 {} 尝试加入组 '{}'，但提供的 task_id '{}' 与组内已记录的 task_id '{}' 不匹配。注册被拒绝。",
-                            client_id, group_id, task_id, existing_group_guard.task_id
+                            "[CM::join_group CREATE_GROUP_BRANCH] Concurrent write, but task_id mismatch for group '{}'. Requested '{}', existing '{}'. Client {}. Registration rejected.",
+                            group_id, task_id, existing_group_guard_concurrent.task_id, client_id
                         );
                         return Err(RegisterResponsePayload {
                             success: false,
                             message: Some(format!(
-                                "注册失败：提供的任务ID '{}' 与组 '{}' 已关联的任务ID '{}' 不匹配。",
-                                task_id, group_id, existing_group_guard.task_id
+                                "注册失败（并发冲突）：提供的任务ID '{}' 与组 '{}' 已关联的任务ID '{}' 不匹配。",
+                                task_id, group_id, existing_group_guard_concurrent.task_id
                             )),
                             assigned_client_id: client_id,
                             effective_group_id: None,
                             effective_role: None,
                         });
                     }
-                    // P3.3.1: 如果组已存在，确保任务状态也存在 (init_task_state 内部应处理重复调用)
+                    info!(
+                        "[CM::join_group CREATE_GROUP_BRANCH] Concurrent write for group '{}'. Task_id '{}' matches existing. Proceeding.",
+                        group_id, task_id
+                    );
+                    // Ensure task state is initialized even in concurrent creation scenario
                     self.task_state_manager.init_task_state(group_id.clone(), task_id.clone()).await;
+                    info!(
+                        "[CM::join_group CREATE_GROUP_BRANCH] Called init_task_state for concurrently created group '{}' (Task '{}').",
+                        group_id, task_id
+                    );
                 }
             }
-        } else { // 组已存在
-            group_arc = self.groups.get(&group_id).unwrap().value().clone(); // 获取已存在组的Arc
+        } else {
+            info!("[CM::join_group GROUP_EXISTS_BRANCH] Group '{}' (Task '{}') exists. Attempting to get.", group_id, task_id);
+            match self.groups.get(&group_id) {
+                Some(entry) => {
+                    group_arc = entry.value().clone();
+                    info!("[CM::join_group GROUP_EXISTS_BRANCH] Successfully got Arc for existing group '{}' (Task '{}').", group_id, task_id);
+                }
+                None => {
+                    error!(
+                        "[CM::join_group GROUP_EXISTS_BRANCH] CRITICAL LOGIC FLAW: Group '{}' (Task '{}') existed at contains_key check, but not found at get. Client {}. This should not happen.",
+                        group_id, task_id, client_id
+                    );
+                    return Err(RegisterResponsePayload {
+                        success: false,
+                        message: Some(format!(
+                            "内部服务器错误（逻辑缺陷）：无法访问组 '{}' 的信息。请重试。",
+                            group_id
+                        )),
+                        assigned_client_id: client_id,
+                        effective_group_id: None,
+                        effective_role: None,
+                    });
+                }
+            }
+
             let existing_group_guard = group_arc.read().await;
             if existing_group_guard.task_id != task_id {
                 warn!(
-                    "[连接管理器::注册] 客户端 {} 尝试加入组 '{}'，但提供的 task_id '{}' 与组内已记录的 task_id '{}' 不匹配。注册被拒绝。",
-                    client_id, group_id, task_id, existing_group_guard.task_id
+                    "[CM::join_group GROUP_EXISTS_BRANCH] Task_id mismatch for existing group '{}'. Requested '{}', existing '{}'. Client {}. Registration rejected.",
+                    group_id, task_id, existing_group_guard.task_id, client_id
                 );
                 return Err(RegisterResponsePayload {
                     success: false,
@@ -529,43 +551,81 @@ impl ConnectionManager {
                     effective_role: None,
                 });
             }
-             // P3.3.1: 确保任务状态也存在 (init_task_state 内部应处理重复调用)
+            info!(
+                "[CM::join_group GROUP_EXISTS_BRANCH] Task_id '{}' matches for existing group '{}'. Client {}. Proceeding.",
+                task_id, group_id, client_id
+            );
             self.task_state_manager.init_task_state(group_id.clone(), task_id.clone()).await;
             info!(
-                "[连接管理器::注册] 组 '{}' (任务ID: '{}') 已存在。客户端 {} 尝试加入。",
-                group_id, task_id, client_id
+                "[CM::join_group GROUP_EXISTS_BRANCH] Called init_task_state for existing group '{}' (Task '{}').",
+                group_id, task_id
             );
         }
 
-
-        // --- 步骤 2: 获取组的写锁，并检查角色冲突 ---
-        let mut group = group_arc.write().await; // 获取组的异步写锁
+        info!("[CM::join_group PRE_WRITE_LOCK] Group '{}' (Task '{}'). Client {}. About to acquire write lock.", group_id, task_id, client_id);
+        let mut group = group_arc.write().await;
+        info!("[CM::join_group POST_WRITE_LOCK] Group '{}' (Task '{}'). Client {}. Acquired write lock. Group cc: {:?}, os: {:?}", 
+            group_id, task_id, client_id, 
+            group.control_center_client.as_ref().map(|c| c.client_id),
+            group.on_site_mobile_client.as_ref().map(|c| c.client_id)
+        );
 
         // 根据请求的角色检查组内是否已有同角色的客户端。
         // 同时处理将当前客户端分配到组内对应角色的槽位。
         let role_conflict_message: Option<String> = match requested_role {
             ClientRole::ControlCenter => {
-                if group.control_center_client.is_some()
-                    && group.control_center_client.as_ref().unwrap().client_id != client_id
-                {
-                    Some(format!(
-                        "组 '{}' 已有一个活动的控制中心客户端。",
-                        group_id
-                    ))
+                // Check if the slot is occupied
+                if let Some(existing_session) = group.control_center_client.as_ref() {
+                    // Slot is occupied. Check if it's the same session trying to re-register (unlikely but safe)
+                    if existing_session.client_id == client_id {
+                        // Same session, allow overwriting/refreshing
+                        group.control_center_client = Some(Arc::clone(&client_session));
+                        None // No conflict
+                    } else {
+                        // Different session in slot. Check if it's marked for closure.
+                        if existing_session.connection_should_close.load(Ordering::SeqCst) {
+                            // Existing session is closing, allow replacement
+                            info!(
+                                "[连接管理器::注册] 组 '{}' 的 {:?} 槽位被标记为关闭的会话 {} 占用。新会话 {} 将替换它。",
+                                group_id, requested_role, existing_session.client_id, client_id
+                            );
+                            group.control_center_client = Some(Arc::clone(&client_session));
+                            None // No conflict, replaced closing session
+                        } else {
+                            // Slot occupied by a different, active session. Conflict.
+                            Some(format!(
+                                "组 '{}' 已有一个活动的控制中心客户端 ({}).",
+                                group_id, existing_session.client_id // Optionally log the existing client ID
+                            ))
+                        }
+                    }
                 } else {
-                    // 如果槽位为空，或者槽位上的客户端就是当前客户端 (例如，客户端断线重连并重新注册)
+                    // Slot is empty, place the new session
                     group.control_center_client = Some(Arc::clone(&client_session));
                     None // 无冲突
                 }
             }
             ClientRole::OnSiteMobile => {
-                if group.on_site_mobile_client.is_some()
-                    && group.on_site_mobile_client.as_ref().unwrap().client_id != client_id
-                {
-                    Some(format!(
-                        "组 '{}' 已有一个活动的现场移动端客户端。",
-                        group_id
-                    ))
+                // Similar logic as above, checking the on_site_mobile_client slot
+                if let Some(existing_session) = group.on_site_mobile_client.as_ref() {
+                    if existing_session.client_id == client_id {
+                        group.on_site_mobile_client = Some(Arc::clone(&client_session));
+                        None
+                    } else {
+                        if existing_session.connection_should_close.load(Ordering::SeqCst) {
+                            info!(
+                                "[连接管理器::注册] 组 '{}' 的 {:?} 槽位被标记为关闭的会话 {} 占用。新会话 {} 将替换它。",
+                                group_id, requested_role, existing_session.client_id, client_id
+                            );
+                            group.on_site_mobile_client = Some(Arc::clone(&client_session));
+                            None
+                        } else {
+                            Some(format!(
+                                "组 '{}' 已有一个活动的现场移动端客户端 ({}).",
+                                group_id, existing_session.client_id
+                            ))
+                        }
+                    }
                 } else {
                     group.on_site_mobile_client = Some(Arc::clone(&client_session));
                     None // 无冲突
@@ -574,8 +634,6 @@ impl ConnectionManager {
             ClientRole::Unknown => { // 不允许以 Unknown 角色注册到特定槽位
                 Some("不允许以 'Unknown' 角色注册。请提供有效的客户端角色。".to_string())
             }
-            // 其他角色 (如果未来支持) 在此添加类似逻辑
-            // _ => Some(format!("不支持的角色: {:?}", requested_role)),
         };
 
         if let Some(conflict_msg) = role_conflict_message {

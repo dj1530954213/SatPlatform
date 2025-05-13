@@ -62,6 +62,8 @@ pub struct WsRegistrationStatusEventPayload {
     pub success: bool,
     /// 如果注册失败，可能包含失败的原因或相关消息。
     pub message: Option<String>,
+    /// 如果注册成功，云端分配给客户端的唯一ID (重要！)
+    pub assigned_client_id: Option<String>,
     /// 如果注册成功，可能包含客户端成功加入的组 ID。
     pub group_id: Option<String>,
     /// 如果注册成功，可能包含与当前会话关联的任务 ID。

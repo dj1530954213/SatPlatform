@@ -1,945 +1,819 @@
 // SatControlCenter/src-tauri/src/ws_client/service.rs
 
-//! WebSocket 客户端服务模块 (`service.rs`)。
+//! `SatControlCenter` (控制中心) 应用的 WebSocket 客户端服务模块。
 //!
-//! 本模块定义并实现了 `WebSocketClientService`，它是 `SatControlCenter` 应用中
-//! 负责管理与云端 `SatCloudService` 之间 WebSocket 通信的核心服务。
-//!
-//! 主要职责包括：
-//! - **连接管理**: 建立 (`connect`)、维护和断开 (`disconnect`) 与云端服务的 WebSocket 连接。
-//! - **消息收发**: 封装发送 (`send_ws_message`) 和接收 (`on_message` 回调处理) 标准化的 `WsMessage`。
-//! - **状态通知**: 通过 Tauri 事件系统 (`event.rs` 中定义的事件) 向前端 Angular 应用报告连接状态的变更 (`WsConnectionStatusEvent`)、接收到的特定业务响应 (如 `EchoResponseEvent`, `WsRegistrationStatusEvent`) 或状态更新 (`LocalTaskStateUpdatedEvent`)。
-//! - **心跳维持**: 启动和管理一个后台任务，定期向云端发送 Ping 消息，并处理 Pong 响应，以维持连接活跃并检测可能的断开。
-//! - **上下文管理**: 存储与当前调试会话相关的上下文信息，如 `group_id`, `task_id`, 以及从云端同步的权威 `TaskDebugState`。
+//! 该模块负责管理与云端 `SatCloudService` 的 WebSocket 连接，
+//! 包括连接建立、断开、消息收发、状态同步以及心跳维持。
 
-// --- 导入依赖 ---
-// **移除不再需要的导入**
-// use crate::config::WsClientConfig; // WebSocket 客户端配置
+use anyhow::Result;
+use log::{debug, error, info, warn};
+use rust_websocket_utils::client::transport;
+use rust_websocket_utils::client::transport::ClientWsStream;
+// use rust_websocket_utils::message::WsMessage;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::{RwLock};
+use tokio::sync::Mutex as TokioMutex;
+use std::sync::Arc;
+use futures_util::stream::{SplitSink};
+use tokio_tungstenite::tungstenite::protocol::Message as TungsteniteMessage;
+use futures_util::SinkExt;
+use chrono::{Utc, DateTime};
+use std::time::Duration;
+use uuid::Uuid;
+use rust_websocket_utils::message::WsMessage;
+
+// 注意：这里的事件导入需要确保与 SatControlCenter/src-tauri/src/event.rs 中的定义一致
 use crate::event::{
-    EchoResponseEventPayload, LocalTaskStateUpdatedEvent, WsConnectionStatusEvent, WsPartnerStatusEvent, WsRegistrationStatusEvent,
-    ECHO_RESPONSE_EVENT, LOCAL_TASK_STATE_UPDATED_EVENT, WS_CONNECTION_STATUS_EVENT, WS_PARTNER_STATUS_EVENT, WS_REGISTRATION_STATUS_EVENT, // 确保所有事件常量都被导入
+    WS_CONNECTION_STATUS_EVENT, WsConnectionStatusEvent, ECHO_RESPONSE_EVENT, EchoResponseEventPayload,
+    WS_REGISTRATION_STATUS_EVENT, WsRegistrationStatusEventPayload,
+    WS_PARTNER_STATUS_EVENT, WsPartnerStatusEventPayload,
+    LOCAL_TASK_STATE_UPDATED_EVENT, LocalTaskStateUpdatedEventPayload,
+    // WS_SERVER_ERROR_EVENT, WsServerErrorEventPayload, // 如果需要处理服务器错误，需要定义这个事件
 };
-// **修正导入路径，直接从 common_models 导入**
+// 注意：这里的 common_models 导入应该不需要更改
 use common_models::{
-    ClientRole, // 客户端角色枚举
-    TaskDebugState, // 共享的任务调试状态模型
-    WsMessage, // 标准 WebSocket 消息结构
-    // 各种 WebSocket 消息的 Payload 定义
-    EchoPayload, ErrorResponsePayload, PartnerStatusPayload, PingPayload, PongPayload, RegisterResponsePayload,
-    // 消息类型常量
-    ECHO_MESSAGE_TYPE, ERROR_RESPONSE_MESSAGE_TYPE, PARTNER_STATUS_UPDATE_MESSAGE_TYPE,
-    PING_MESSAGE_TYPE, PONG_MESSAGE_TYPE, REGISTER_RESPONSE_MESSAGE_TYPE,
-    TASK_STATE_UPDATE_MESSAGE_TYPE, // 确保任务状态更新类型常量被导入
+    self,
+    ws_payloads::{
+        PING_MESSAGE_TYPE, PONG_MESSAGE_TYPE, PingPayload,
+        REGISTER_RESPONSE_MESSAGE_TYPE, RegisterResponsePayload,
+        PARTNER_STATUS_UPDATE_MESSAGE_TYPE, PartnerStatusPayload,
+        TASK_STATE_UPDATE_MESSAGE_TYPE,
+        ECHO_MESSAGE_TYPE, // Assuming EchoPayload is constructed elsewhere
+        // ERROR_RESPONSE_MESSAGE_TYPE, ErrorResponsePayload, // Removed unused imports
+    },
+    TaskDebugState,
 };
-use chrono::{DateTime, Utc}; // 日期和时间处理
-use futures_util::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-}; // WebSocket 流处理
-use log::{debug, error, info, warn}; // 日志记录宏
-// **修正 rust_websocket_utils 导入路径 **
-use rust_websocket_utils::error::WsError; // 或者直接使用 WsError 如果它在顶层导出
-// 假设 ClientWsStream, ClientConnection 是从 client::transport 导出
-use rust_websocket_utils::client::transport::{ClientConnection, ClientWsStream};
-// **移除无效的 TransportLayer 导入**
-// use rust_websocket_utils::transport::TransportLayer;
-use serde_json; // JSON 序列化/反序列化
-use std::sync::Arc; // 原子引用计数，用于共享状态
-use tauri::{AppHandle, Emitter, Manager}; // Tauri 应用句柄, Emitter 和 State 管理
-use tokio::sync::{Mutex as TokioMutex, RwLock}; // Tokio 提供的异步锁
-use tokio_tungstenite::{tungstenite::Message as TungsteniteMessage, MaybeTlsStream};
-use url::Url; // URL 解析
-use uuid::Uuid; // UUID 生成和处理
-use tokio::net::TcpStream; // **导入 TcpStream 用于类型签名**
-use tokio_tungstenite::WebSocketStream; // **导入 WebSocketStream 用于类型签名**
 
-// --- 服务结构体定义 ---
+// 心跳机制相关常量
+/// 心跳发送间隔，单位：秒。
+const HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
+/// 等待 Pong 回复的超时时间，单位：秒。
+/// 注意：此值应小于 `HEARTBEAT_INTERVAL_SECONDS`，以确保在下一个心跳周期开始前能检测到超时。
+const PONG_TIMEOUT_SECONDS: u64 = 10;
 
-/// WebSocket 客户端服务 (`WebSocketClientService`)。
+/// WebSocket 客户端服务。
 ///
-/// 负责管理与云端 `SatCloudService` 的单一 WebSocket 连接、消息收发、
-/// 状态维护和心跳检测。
-/// 通过 `Arc` 包裹并注册为 Tauri `State`，以便在 Tauri 命令中安全地访问和共享。
-#[derive(Debug)] // 允许打印调试信息
+/// 封装了与云端 WebSocket 服务交互的所有逻辑，包括连接管理、
+/// 消息发送与接收、心跳维持以及状态事件的发射。
+#[derive(Debug)]
 pub struct WebSocketClientService {
-    /// WebSocket 发送通道 (`SplitSink`) 的独占访问。
-    /// `Some(sink)` 表示连接已建立且发送通道可用；`None` 表示未连接或连接已关闭。
-    /// 使用 `Arc<TokioMutex<...>>` 确保在多个异步任务中对发送通道的访问是互斥和安全的。
+    /// WebSocket 消息发送通道 (Sink 部分)。
+    ///
+    /// `SplitSink` 用于向 WebSocket 连接异步发送消息。
+    /// 使用 `Arc<TokioMutex<Option<...>>>` 以允许在异步任务间共享和修改。
+    /// `Option` 表示连接可能尚未建立或已断开。
     ws_send_channel: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-
-    /// 由云端服务在连接成功后分配给本控制中心客户端的唯一标识符 (`client_id`)。
-    /// `Some(uuid)` 包含该 ID；`None` 表示尚未连接或未分配 ID。
-    /// 注意：此 ID 主要用于云端识别客户端会话，中心端自身通常不需要频繁使用它。
-    /// 使用 `Arc<RwLock<...>>` 允许多个任务并发读取 ID，写入则需要独占访问。
+    /// 云端分配给此客户端的唯一标识符 (UUID)。
+    ///
+    /// 在成功连接并注册后，由云端分配 (通过 RegisterResponse 确认)。
+    /// 使用 `Arc<RwLock<Option<Uuid>>>` 以便在异步回调中安全地更新和读取。
     cloud_assigned_client_id: Arc<RwLock<Option<Uuid>>>,
-
-    /// 当前客户端加入的组 ID。
-    /// 在成功调用 `register_client_with_task` 并收到成功的 `RegisterResponse` 后设置。
-    current_group_id: Arc<RwLock<Option<String>>>,
-
-    /// 当前客户端关联的任务 ID。
-    /// 在成功调用 `register_client_with_task` 并收到成功的 `RegisterResponse` 后设置。
-    current_task_id: Arc<RwLock<Option<String>>>,
-
-    /// 本地缓存的、从云端同步过来的权威任务调试状态。
-    /// 当收到 `TaskStateUpdate` 消息时更新此状态。
-    current_task_state: Arc<RwLock<Option<TaskDebugState>>>,
-
-    /// Tauri 应用的句柄 (`AppHandle`)。
-    /// 用于从服务内部与 Tauri 系统交互，最主要是通过 `Emitter` 向前端发送事件。
-    /// 此句柄在服务创建时传入，并在服务内部被克隆和使用。
+    /// Tauri 应用句柄。
+    ///
+    /// 用于向前端发送事件和管理应用状态。
     app_handle: AppHandle,
-
-    /// 当前 WebSocket 的连接状态标志。
-    /// `true` 表示已连接；`false` 表示未连接。
-    /// 使用 `Arc<RwLock<...>>` 进行并发安全的读写访问。
+    /// 当前 WebSocket 连接状态。
+    ///
+    /// `true` 表示已连接，`false` 表示未连接或已断开。
+    /// 使用 `Arc<RwLock<...>>` 以便在异步回调中安全地更新和读取。
     is_connected_status: Arc<RwLock<bool>>,
-
-    /// WebSocket 连接管理任务 (`connect_client` 和消息接收循环) 的句柄 (`JoinHandle`)。
-    /// `Some(handle)` 表示连接任务正在运行；`None` 表示没有活动的连接任务。
-    /// 用于在断开连接或服务销毁时能够中止或等待连接任务结束。
-    /// 使用 `Arc<TokioMutex<...>>` 保护对句柄的访问。
+    /// WebSocket 连接处理任务的句柄。
+    ///
+    /// `tokio::task::JoinHandle` 用于管理 `connect_client` 返回的连接处理任务的生命周期。
+    /// `Option` 表示任务可能尚未启动或已结束。
     connection_task_handle: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-
-    /// 心跳任务的句柄 (`JoinHandle`)。
-    /// `Some(handle)` 表示心跳任务 (定期发送 Ping 并检查 Pong) 正在运行。
-    /// 用于在连接断开或服务状态变化时管理心跳任务的生命周期 (启动、停止)。
-    /// 使用 `Arc<TokioMutex<...>>` 保护对句柄的访问。
+    /// 心跳任务的句柄。
+    ///
+    /// 用于管理定期发送 Ping 消息的后台任务。
     heartbeat_task_handle: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-
-    /// 最后一次成功收到云端 Pong 消息的时间戳。
-    /// 用于心跳机制中检测 Pong 是否超时。
-    /// `Some(DateTime<Utc>)` 记录时间；`None` 表示尚未收到过 Pong 或连接已重置。
-    /// 使用 `Arc<RwLock<...>>` 进行并发安全的读写。
+    /// 最后一次收到 Pong 消息的时间戳。
+    ///
+    /// 用于心跳机制中检测连接是否仍然活跃。
     last_pong_received_at: Arc<RwLock<Option<DateTime<Utc>>>>,
-
-    // **移除对 WsClientConfig 的直接依赖，服务内部逻辑可能需要调整以适应**
-    // config: Arc<WsClientConfig>,
+    /// 本地缓存的、从云端同步过来的权威任务状态。
+    ///
+    /// 当收到云端的 "TaskStateUpdate" 消息时，此状态会被更新。
+    /// 前端可以通过监听 `LocalTaskStateUpdatedEvent` 事件来获取最新的状态。
+    local_task_state_cache: Arc<RwLock<Option<TaskDebugState>>>,
 }
-
-// --- 服务实现 ---
 
 impl WebSocketClientService {
     /// 创建 `WebSocketClientService` 的新实例。
     ///
-    /// # Arguments
+    /// # 参数
     ///
-    /// * `app_handle` - Tauri 应用的句柄，用于事件发送等。
-    /// // * `config` - WebSocket 客户端的配置。 (移除)
+    /// * `app_handle` - Tauri 应用的句柄，用于事件发射和应用管理。
     ///
-    /// # Returns
+    /// # 返回
     ///
-    /// 返回一个新的 `WebSocketClientService` 实例，所有内部状态都处于初始（未连接）状态。
-    pub fn new(app_handle: AppHandle /* 移除 config 参数 */) -> Self {
-        info!("创建新的 WebSocketClientService 实例。");
+    /// 返回一个新的 `WebSocketClientService` 实例。
+    pub fn new(app_handle: AppHandle) -> Self {
+        // **日志标识符已更改**
+        info!("[SatControlCenter] WebSocketClientService: 正在初始化..."); 
         Self {
             ws_send_channel: Arc::new(TokioMutex::new(None)),
             cloud_assigned_client_id: Arc::new(RwLock::new(None)),
-            current_group_id: Arc::new(RwLock::new(None)), // 初始化新字段
-            current_task_id: Arc::new(RwLock::new(None)), // 初始化新字段
-            current_task_state: Arc::new(RwLock::new(None)), // 初始化新字段
             app_handle,
             is_connected_status: Arc::new(RwLock::new(false)),
             connection_task_handle: Arc::new(TokioMutex::new(None)),
             heartbeat_task_handle: Arc::new(TokioMutex::new(None)),
             last_pong_received_at: Arc::new(RwLock::new(None)),
-            // config: Arc::new(config), // 移除配置存储
+            local_task_state_cache: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// 设置当前调试上下文（组ID和任务ID）。
+    /// 尝试连接到指定的 WebSocket 服务器 URL。
     ///
-    /// 通常在成功处理 `RegisterResponse` 消息后调用。
+    /// 此方法会启动一个后台异步任务来处理 WebSocket 连接的整个生命周期，
+    /// 包括建立连接、接收消息、处理心跳、以及处理断开或错误。
+    /// 状态变更会通过 Tauri 事件通知前端。
     ///
-    /// # Arguments
+    /// # 参数
+    /// * `url_str`: 要连接的 WebSocket 服务器 URL 字符串。
     ///
-    /// * `group_id` - 成功注册到的组 ID。
-    /// * `task_id` - 关联的任务 ID。
-    pub async fn set_current_context(&self, group_id: String, task_id: String) {
-        info!(
-            "设置当前调试上下文: 组ID='{}', 任务ID='{}'",
-            group_id, task_id
-        );
-        *self.current_group_id.write().await = Some(group_id);
-        *self.current_task_id.write().await = Some(task_id);
-        // 注意：TaskDebugState 通常通过 TaskStateUpdate 消息设置，而不是在这里。
-    }
-
-    /// 处理 WebSocket 连接成功建立时的逻辑 (`on_open` 回调)。
-    ///
-    /// 负责更新内部状态、启动心跳任务，并通过 Tauri 事件通知前端。
-    ///
-    /// # Arguments
-    ///
-    /// * `app_handle` - Tauri 应用句柄。
-    /// * `cloud_client_id` - 云端分配的客户端 ID（如果连接握手时提供了）。
-    /// * `is_connected_status` - 连接状态标志的原子引用。
-    /// * `cloud_assigned_client_id_state` - 云端分配 ID 状态的原子引用。
-    /// * `ws_send_channel_clone` - 发送通道状态的原子引用（用于心跳）。
-    /// * `heartbeat_task_handle_clone` - 心跳任务句柄状态的原子引用。
-    /// * `last_pong_received_at_clone` - 最后 Pong 时间状态的原子引用。
-    /// * `heartbeat_interval_seconds` - 心跳发送间隔（秒）。
-    /// * `pong_timeout_seconds` - Pong 响应超时时间（秒）。
-    // **添加心跳参数到签名**
-    async fn handle_on_open(
-        app_handle: &AppHandle,
-        cloud_client_id: Option<Uuid>, // 改为 Option<Uuid>
-        is_connected_status: &Arc<RwLock<bool>>,
-        cloud_assigned_client_id_state: &Arc<RwLock<Option<Uuid>>>, // 对应修改
-        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>, // 用于心跳任务
-        heartbeat_task_handle_clone: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
-        heartbeat_interval_seconds: u64, // **新增心跳间隔参数**
-        pong_timeout_seconds: u64,       // **新增 Pong 超时参数**
-    ) {
-        info!(
-            "WebSocket 连接已成功建立。云端分配的 Client ID: {:?}",
-            cloud_client_id
-        );
-
-        // 1. 更新内部连接状态
-        *is_connected_status.write().await = true;
-        *cloud_assigned_client_id_state.write().await = cloud_client_id; // 存储云端分配的ID
-
-        // 2. 向前端发送连接成功事件
-        let event_payload = WsConnectionStatusEvent {
-            connected: true,
-            client_id: cloud_client_id.map(|id| id.to_string()), // 将 Uuid 转换为 String
-            error_message: None,
-        };
-        // **使用 emit**
-        if let Err(e) = app_handle.emit(WS_CONNECTION_STATUS_EVENT, event_payload) {
-            error!("向前端发送 WebSocket 连接成功事件失败: {}", e);
-        }
-
-        // 3. 重置最后接收 Pong 的时间
-        *last_pong_received_at_clone.write().await = Some(Utc::now());
-
-        // 4. 启动心跳任务
-        // **现在可以传入配置信息**
-        Self::start_heartbeat_task_static(
-            app_handle.clone(),
-            ws_send_channel_clone,
-            heartbeat_task_handle_clone,
-            last_pong_received_at_clone.clone(),
-            is_connected_status.clone(),
-            cloud_assigned_client_id_state.clone(),
-            heartbeat_interval_seconds, // **传递心跳间隔**
-            pong_timeout_seconds, // **传递 Pong 超时**
-        ).await;
-        // warn!("心跳任务未启动，因为缺少配置信息。"); // 移除旧警告
-    }
-
-    /// 处理收到的 WebSocket 消息 (`on_message` 回调)。
-    ///
-    /// 负责解析 `WsMessage`，根据 `message_type` 分发到不同的处理逻辑，
-    /// 并处理 Ping/Pong 消息。
-    async fn handle_on_message(
-        app_handle: &AppHandle,
-        ws_msg: WsMessage,
-        cloud_assigned_client_id_state: Arc<RwLock<Option<Uuid>>>,
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
-        current_task_state_cache: Arc<RwLock<Option<TaskDebugState>>>,
-    ) {
-        debug!("收到 WebSocket 消息: 类型='{}'", ws_msg.message_type);
-
-        match ws_msg.message_type.as_str() {
-            // 处理 Pong 消息 (心跳响应)
-            PONG_MESSAGE_TYPE => {
-                debug!("收到 Pong 响应。");
-                *last_pong_received_at_clone.write().await = Some(Utc::now());
-            }
-
-            // 处理 Echo 响应
-            ECHO_MESSAGE_TYPE => {
-                match serde_json::from_str::<EchoPayload>(&ws_msg.payload) {
-                    Ok(payload) => {
-                        info!("收到 Echo 响应，内容: '{}'", payload.content);
-                        let event_payload = EchoResponseEventPayload { content: payload.content };
-                        if let Err(e) = app_handle.emit(ECHO_RESPONSE_EVENT, event_payload) {
-                            error!("向前端发送 Echo 响应事件失败: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("反序列化 EchoPayload 失败: {}, 原始负载: {}", e, ws_msg.payload);
-                    }
-                }
-            }
-
-            // 处理注册响应
-            REGISTER_RESPONSE_MESSAGE_TYPE => {
-                match serde_json::from_str::<RegisterResponsePayload>(&ws_msg.payload) {
-                    Ok(payload) => {
-                        info!("收到注册响应: 成功={}, ClientID={:?}, 有效组ID={:?}, 消息={:?}",
-                              payload.success, payload.assigned_client_id, payload.effective_group_id, payload.message);
-
-                        let client_id = payload.assigned_client_id;
-                        let effective_group_id = payload.effective_group_id.clone();
-
-                        // 更新内部状态 (如果注册成功，只更新 client_id)
-                        if payload.success {
-                            *cloud_assigned_client_id_state.write().await = Some(client_id);
-                        }
-
-                        // 向前端发送注册状态事件
-                        let event_payload = WsRegistrationStatusEvent {
-                            success: payload.success,
-                            message: payload.message,
-                            group_id: effective_group_id.unwrap_or_default(),
-                            assigned_client_id: Some(client_id),
-                        };
-                        if let Err(e) = app_handle.emit(WS_REGISTRATION_STATUS_EVENT, event_payload) {
-                            error!("向前端发送注册状态事件失败: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("反序列化 RegisterResponsePayload 失败: {}, 原始负载: {}", e, ws_msg.payload);
-                    }
-                }
-            }
-
-            // 处理伙伴状态更新
-            PARTNER_STATUS_UPDATE_MESSAGE_TYPE => {
-                match serde_json::from_str::<PartnerStatusPayload>(&ws_msg.payload) {
-                    Ok(payload) => {
-                        info!("收到伙伴状态更新: 角色={:?}, ClientID={}, 在线={}, 组ID={}",
-                              payload.partner_role, payload.partner_client_id, payload.is_online, payload.group_id);
-
-                        // 向前端发送伙伴状态事件
-                        let event_payload = WsPartnerStatusEvent {
-                            partner_role: payload.partner_role,
-                            partner_client_id: payload.partner_client_id,
-                            is_online: payload.is_online,
-                            group_id: payload.group_id,
-                        };
-                        if let Err(e) = app_handle.emit(WS_PARTNER_STATUS_EVENT, event_payload) {
-                            error!("向前端发送伙伴状态事件失败: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("反序列化 PartnerStatusPayload 失败: {}, 原始负载: {}", e, ws_msg.payload);
-                    }
-                }
-            }
-
-            // 处理任务状态更新
-            TASK_STATE_UPDATE_MESSAGE_TYPE => {
-                match serde_json::from_str::<TaskDebugState>(&ws_msg.payload) {
-                    Ok(new_state) => {
-                        info!("收到任务状态更新 (TaskStateUpdate)，任务 ID: {}", new_state.task_id);
-                        debug!("新任务状态详情: {:?}", new_state); // 打印完整状态 (Debug)
-
-                        // 更新本地缓存的任务状态
-                        *current_task_state_cache.write().await = Some(new_state.clone());
-
-                        // 向前端发送本地任务状态已更新事件
-                        let event_payload = LocalTaskStateUpdatedEvent { new_state };
-                        if let Err(e) = app_handle.emit(LOCAL_TASK_STATE_UPDATED_EVENT, event_payload) {
-                            error!("向前端发送本地任务状态更新事件失败: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("反序列化 TaskDebugState 失败: {}, 原始负载: {}", e, ws_msg.payload);
-                    }
-                }
-            }
-
-            // 处理错误响应
-            ERROR_RESPONSE_MESSAGE_TYPE => {
-                match serde_json::from_str::<ErrorResponsePayload>(&ws_msg.payload) {
-                    Ok(payload) => {
-                        error!("收到来自云端的错误响应: {}, 原始消息类型: {:?}",
-                               payload.error, payload.original_message_type);
-                        // 可选：向前端发送一个特定的错误事件
-                        // let event_payload = WsServerErrorEvent { ... };
-                        // app_handle.emit(WS_SERVER_ERROR_EVENT, event_payload).ok();
-                    }
-                    Err(e) => {
-                        error!("反序列化 ErrorResponsePayload 失败: {}, 原始负载: {}", e, ws_msg.payload);
-                    }
-                }
-            }
-
-            // 处理其他未知或未实现的消息类型
-            _ => {
-                warn!("收到未知或未处理的 WebSocket 消息类型: '{}'", ws_msg.message_type);
-            }
-        }
-    }
-
-    /// 处理 WebSocket 连接关闭时的逻辑 (`on_close` 回调)。
-    ///
-    /// 负责清理状态、停止心跳任务，并通过 Tauri 事件通知前端。
-    async fn handle_on_close(
-        app_handle: &AppHandle,
-        reason: Option<String>,
-        is_connected_status: &Arc<RwLock<bool>>,
-        cloud_assigned_client_id_state: &Arc<RwLock<Option<Uuid>>>,
-        ws_send_channel_clone_for_cleanup: &Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-        current_group_id_state: &Arc<RwLock<Option<String>>>,
-        current_task_id_state: &Arc<RwLock<Option<String>>>,
-        current_task_state_cache: &Arc<RwLock<Option<TaskDebugState>>>,
-    ) {
-        info!("WebSocket 连接已关闭。原因: {:?}", reason);
-
-        // 1. 停止心跳任务
-        Self::stop_heartbeat_task_static(
-            heartbeat_task_handle_clone,
-            last_pong_received_at_clone,
-        )
-        .await;
-
-        // 2. 清理内部状态
-        *is_connected_status.write().await = false;
-        let old_client_id = cloud_assigned_client_id_state.write().await.take(); // 清理并获取旧 ID
-        *ws_send_channel_clone_for_cleanup.lock().await = None; // 清理发送通道
-        // 正确清理 RwLock<Option<T>>
-        *current_group_id_state.write().await = None;
-        *current_task_id_state.write().await = None;
-        *current_task_state_cache.write().await = None;
-
-        // 3. 向前端发送连接关闭事件
-        let event_payload = WsConnectionStatusEvent {
-            connected: false,
-            client_id: old_client_id.map(|id| id.to_string()), // 发送关闭前的 ID
-            error_message: reason.or_else(|| Some("连接已关闭 (无特定原因)".to_string())),
-        };
-        // **使用 emit**
-        if let Err(e) = app_handle.emit(WS_CONNECTION_STATUS_EVENT, event_payload) {
-            error!("向前端发送 WebSocket 连接关闭事件失败: {}", e);
-        }
-    }
-
-    /// 处理 WebSocket 连接过程中发生的错误 (`on_error` 回调)。
-    ///
-    /// 负责记录错误、清理状态、停止心跳，并通过 Tauri 事件通知前端。
-    async fn handle_on_error(
-        app_handle: &AppHandle,
-        error_message_str: String,
-        is_connected_status: &Arc<RwLock<bool>>,
-        cloud_assigned_client_id_state: &Arc<RwLock<Option<Uuid>>>,
-        ws_send_channel_clone_for_cleanup: &Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-        current_group_id_state: &Arc<RwLock<Option<String>>>,
-        current_task_id_state: &Arc<RwLock<Option<String>>>,
-        current_task_state_cache: &Arc<RwLock<Option<TaskDebugState>>>,
-    ) {
-        error!("WebSocket 连接发生错误: {}", error_message_str);
-
-        // 1. 停止心跳任务 (如果正在运行)
-        Self::stop_heartbeat_task_static(
-            heartbeat_task_handle_clone,
-            last_pong_received_at_clone,
-        )
-        .await;
-
-        // 2. 清理内部状态 (与 handle_on_close 类似)
-        let was_connected = *is_connected_status.read().await;
-        if was_connected { // 仅当之前是连接状态时才清理
-            *is_connected_status.write().await = false;
-            let old_client_id = cloud_assigned_client_id_state.write().await.take();
-            *ws_send_channel_clone_for_cleanup.lock().await = None;
-            // 正确清理 RwLock<Option<T>>
-            *current_group_id_state.write().await = None;
-            *current_task_id_state.write().await = None;
-            *current_task_state_cache.write().await = None;
-
-            // 3. 向前端发送连接错误/断开事件
-            let event_payload = WsConnectionStatusEvent {
-                connected: false,
-                client_id: old_client_id.map(|id| id.to_string()),
-                error_message: Some(error_message_str.clone()), // 克隆错误消息
-            };
-            // **使用 emit**
-            if let Err(e) = app_handle.emit(WS_CONNECTION_STATUS_EVENT, event_payload) {
-                error!("向前端发送 WebSocket 连接错误事件失败: {}", e);
-            }
-        } else {
-             // 如果之前就不是连接状态 (例如，连接尝试失败)，只发送错误事件
-             let event_payload = WsConnectionStatusEvent {
-                connected: false,
-                client_id: None, // 连接失败，没有 client_id
-                error_message: Some(error_message_str), // 使用原始错误消息
-            };
-            // **使用 emit**
-            if let Err(e) = app_handle.emit(WS_CONNECTION_STATUS_EVENT, event_payload) {
-                error!("向前端发送 WebSocket 连接尝试失败事件失败: {}", e);
-            }
-        }
-    }
-
-    /// 启动心跳任务 (静态方法版本，便于在回调中调用)。
-    ///
-    /// 定期发送 Ping 消息，并检查 Pong 响应是否超时。
-    ///
-    /// **注意：需要传入配置参数。**
-    async fn start_heartbeat_task_static(
-        app_handle: AppHandle,
-        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
-        is_connected_status_clone: Arc<RwLock<bool>>,
-        cloud_assigned_client_id_clone: Arc<RwLock<Option<Uuid>>>, // Uuid
-        heartbeat_interval_seconds: u64, // **传入心跳间隔**
-        pong_timeout_seconds: u64, // **传入 Pong 超时**
-    ) {
-        let mut handle_guard = heartbeat_task_handle_clone.lock().await;
-        if handle_guard.is_some() {
-            info!("心跳任务已在运行。");
-            return;
-        }
-
-        info!("启动 WebSocket 心跳任务 (间隔: {}秒, Pong 超时: {}秒)", heartbeat_interval_seconds, pong_timeout_seconds);
-
-        // 启动一个新的 Tokio 任务来执行心跳逻辑
-        let heartbeat_task = tokio::spawn(async move {
-            let ping_interval = tokio::time::Duration::from_secs(heartbeat_interval_seconds);
-            let pong_timeout = tokio::time::Duration::from_secs(pong_timeout_seconds);
-            let mut interval = tokio::time::interval(ping_interval);
-
-            loop {
-                interval.tick().await; // 等待下一个心跳周期
-
-                // 检查连接状态，如果已断开则退出心跳任务
-                if !*is_connected_status_clone.read().await {
-                    info!("连接已断开，停止心跳任务。");
-                    break;
-                }
-
-                // 检查 Pong 是否超时
-                let last_pong_time = *last_pong_received_at_clone.read().await;
-                if let Some(last_pong) = last_pong_time {
-                    if Utc::now().signed_duration_since(last_pong).to_std().unwrap_or_default() > pong_timeout {
-                        warn!("Pong 响应超时 (超过 {} 秒未收到)，可能连接已丢失。", pong_timeout_seconds);
-                        // 触发连接错误处理 (模拟错误，让主连接循环处理断开)
-                        let error_msg = "Pong timeout".to_string();
-                        // 需要一个方法来从这里触发 handle_on_error 或类似逻辑
-                        // 暂时只记录警告，依赖主循环检测断开
-                        // TODO: 实现更主动的断开处理机制
-                        break; // 退出心跳任务
-                    }
-                }
-
-                // 发送 Ping 消息
-                let ping_payload = PingPayload {};
-                match serde_json::to_string(&ping_payload) {
-                    Ok(payload_json) => {
-                        let ping_msg = WsMessage {
-                            message_id: Uuid::new_v4().to_string(),
-                            timestamp: Utc::now().timestamp_millis(),
-                            message_type: PING_MESSAGE_TYPE.to_string(),
-                            payload: payload_json,
-                        };
-                        match serde_json::to_string(&ping_msg) {
-                            Ok(msg_str) => {
-                                let tungstenite_msg = TungsteniteMessage::Text(msg_str);
-                                let mut sender_guard = ws_send_channel_clone.lock().await;
-                                if let Some(sender) = sender_guard.as_mut() {
-                                    if let Err(e) = sender.send(tungstenite_msg).await {
-                                        error!("发送 Ping 消息失败: {}", e);
-                                        // 发送失败可能意味着连接已断开，退出心跳任务
-                                        break;
-                                    } else {
-                                        debug!("Ping 消息已发送。");
-                                    }
-                                } else {
-                                    info!("发送通道不可用，无法发送 Ping，停止心跳任务。");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                error!("序列化 Ping WsMessage 失败: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("序列化 PingPayload 失败: {}", e);
-                    }
-                }
-            }
-            info!("心跳任务已退出。");
-        });
-
-        // 存储心跳任务的句柄
-        *handle_guard = Some(heartbeat_task);
-    }
-
-    /// 停止心跳任务 (静态方法版本)。
-    async fn stop_heartbeat_task_static(
-        heartbeat_task_handle_clone: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-    ) {
-        let mut handle_guard = heartbeat_task_handle_clone.lock().await;
-        if let Some(handle) = handle_guard.take() { // take() 会移除句柄
-            info!("正在停止 WebSocket 心跳任务...");
-            handle.abort(); // 请求中止任务
-            match handle.await {
-                Ok(_) => info!("心跳任务已成功中止。"),
-                Err(e) if e.is_cancelled() => info!("心跳任务已成功中止 (cancelled)。"),
-                Err(e) => warn!("等待心跳任务中止时发生错误: {:?}", e),
-            }
-        } else {
-            debug!("没有正在运行的心跳任务需要停止。");
-        }
-        // 清理最后 Pong 时间
-        *last_pong_received_at_clone.write().await = None;
-    }
-
-    /// 尝试连接到指定的 WebSocket URL。
-    ///
-    /// 这是供 Tauri 命令 (`connect_to_cloud`) 调用的主要入口点。
+    /// # 返回
+    /// * `Result<(), String>`: 如果连接启动过程成功（即后台任务已安排），则返回 `Ok(())`。
+    ///   如果 URL 无效或在启动连接任务时发生即时错误，则返回 `Err(String)`。
+    ///   注意：实际的连接成功或失败将通过 `WS_CONNECTION_STATUS_EVENT` 事件异步通知。
     pub async fn connect(&self, url_str: &str) -> Result<(), String> {
-        info!("WebSocket 服务收到连接请求，目标 URL: {}", url_str);
+        // **日志标识符已更改**
+        info!("[SatControlCenter] WebSocketClientService::connect 调用，目标 URL: {}", url_str);
 
-        // 检查是否已连接或正在连接
-        if *self.is_connected_status.read().await {
-            let msg = "WebSocket 已连接。无需重复连接。".to_string();
-            info!("{}", msg);
-            return Ok(()); // 幂等操作，直接返回成功
-        }
-        if self.connection_task_handle.lock().await.is_some() {
-            let msg = "WebSocket 正在连接中... 请稍候。".to_string();
-            warn!("{}", msg);
-            return Err(msg);
-        }
-
-        // 解析 URL
-        let url = match Url::parse(url_str) {
-            Ok(u) => u,
-            Err(e) => {
-                let err_msg = format!("无效的 WebSocket URL '{}': {}", url_str, e);
-                error!("{}", err_msg);
-                // 在启动任务失败时也需要通知前端 (此逻辑已在 handle_on_error 中)
-                // 因此，直接返回错误即可
-                return Err(err_msg);
-            }
-        };
-
-        // 克隆状态
+        // 克隆需要在新任务中使用的 Arc 引用
         let app_handle_clone = self.app_handle.clone();
         let ws_send_channel_clone = self.ws_send_channel.clone();
-        let is_connected_status_clone = self.is_connected_status.clone();
         let cloud_assigned_client_id_clone = self.cloud_assigned_client_id.clone();
+        let is_connected_status_clone = self.is_connected_status.clone();
+        let connection_task_handle_clone = self.connection_task_handle.clone();
         let heartbeat_task_handle_clone = self.heartbeat_task_handle.clone();
         let last_pong_received_at_clone = self.last_pong_received_at.clone();
-        let connection_task_handle_clone = self.connection_task_handle.clone();
-        let current_group_id_clone = self.current_group_id.clone();
-        let current_task_id_clone = self.current_task_id.clone();
-        let current_task_state_clone = self.current_task_state.clone();
+        let local_task_state_cache_clone = self.local_task_state_cache.clone();
+        let url_string = url_str.to_string();
 
-        // 启动连接任务
-        let connection_task = tokio::spawn(async move {
-            info!("启动 WebSocket 连接任务...");
-
-            match rust_websocket_utils::client::transport::connect_client(
-                url.to_string(),
-            )
-            .await
-            {
-                Ok(client_connection) => {
-                    let ws_sender = client_connection.ws_sender;
-                    let ws_receiver = client_connection.ws_receiver;
-                    *ws_send_channel_clone.lock().await = Some(ws_sender);
-
-                    let heartbeat_interval = 30;
-                    let pong_timeout = 10;
-                    let maybe_client_id = None;
-
-                    Self::handle_on_open(
-                        &app_handle_clone,
-                        maybe_client_id,
-                        &is_connected_status_clone,
-                        &cloud_assigned_client_id_clone,
-                        ws_send_channel_clone.clone(),
-                        heartbeat_task_handle_clone.clone(),
-                        last_pong_received_at_clone.clone(),
-                        heartbeat_interval,
-                        pong_timeout,
-                    )
-                    .await;
-
-                    Self::message_receive_loop(
-                        ws_receiver,
-                        &app_handle_clone,
-                        cloud_assigned_client_id_clone.clone(),
-                        last_pong_received_at_clone.clone(),
-                        current_task_state_clone.clone(),
-                        &is_connected_status_clone,
-                        &ws_send_channel_clone,
-                        &heartbeat_task_handle_clone,
-                        &current_group_id_clone,
-                        &current_task_id_clone,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    let err_msg = format!("连接到 WebSocket 服务器 '{}' 失败: {}", url, e);
-                    error!("{}", err_msg);
-                    Self::handle_on_error(
-                        &app_handle_clone,
-                        err_msg,
-                        &is_connected_status_clone,
-                        &cloud_assigned_client_id_clone,
-                        &ws_send_channel_clone,
-                        &heartbeat_task_handle_clone,
-                        &last_pong_received_at_clone,
-                        &current_group_id_clone,
-                        &current_task_id_clone,
-                        &current_task_state_clone,
-                    )
-                    .await;
-                }
+        // 如果当前已有连接任务在运行，先尝试取消它
+        let mut conn_task_guard = connection_task_handle_clone.lock().await;
+        if let Some(handle) = conn_task_guard.take() {
+            // **日志标识符已更改**
+            info!("[SatControlCenter] 检测到之前的连接任务正在运行，正在尝试取消...");
+            handle.abort(); // 请求取消任务
+            match handle.await { // 等待任务结束（即使是被取消的）
+                // **日志标识符已更改**
+                Ok(_) => info!("[SatControlCenter] 之前的连接任务已成功取消或完成。"),
+                // **日志标识符已更改**
+                Err(e) if e.is_cancelled() => info!("[SatControlCenter] 之前的连接任务已被取消。"),
+                // **日志标识符已更改**
+                Err(e) => warn!("[SatControlCenter] 等待之前的连接任务结束时发生错误: {:?}", e),
             }
-            info!("WebSocket 连接任务结束。");
-            *connection_task_handle_clone.lock().await = None;
-        });
+            // **日志标识符已更改**
+            info!("[SatControlCenter] 已清理之前的连接任务句柄。");
+            // 清理相关状态
+            *is_connected_status_clone.write().await = false;
+            *ws_send_channel_clone.lock().await = None;
+            *cloud_assigned_client_id_clone.write().await = None;
+            // 心跳任务句柄也应停止
+            let mut hb_task_guard = heartbeat_task_handle_clone.lock().await;
+            if let Some(hb_handle) = hb_task_guard.take() {
+                 hb_handle.abort();
+                 // **日志标识符已更改**
+                 info!("[SatControlCenter] 已请求取消相关的心跳任务。");
+                 // 不必 await 心跳任务的结束，因为它应该很快响应 abort
+            }
+            *last_pong_received_at_clone.write().await = None;
+        }
+        drop(conn_task_guard); // 释放锁
 
-        *self.connection_task_handle.lock().await = Some(connection_task);
+        // 启动新的异步任务来处理连接生命周期
+        let connection_task = tokio::spawn(async move {
+            let mut connection_attempt_successful = false;
+            let mut final_error_message: Option<String> = None;
+            let mut heartbeat_join_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-        Ok(())
-    }
+            // --- 连接阶段 ---
+            // **日志标识符已更改**
+            info!("[SatControlCenter] (连接任务) 开始尝试连接到: {}", url_string);
+            match transport::connect_client(url_string.clone()).await {
+                Ok(mut client_connection) => {
+                    // **日志标识符已更改**
+                    info!("[SatControlCenter] (连接任务) 连接成功建立。");
+                    connection_attempt_successful = true;
 
-    /// WebSocket 消息接收循环。
-    /// **修改 Stream 的 Item 类型为 Result<..., tungstenite::Error>**
-    async fn message_receive_loop(
-        mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>, // **使用具体类型而非泛型**
-        app_handle: &AppHandle,
-        cloud_assigned_client_id_state: Arc<RwLock<Option<Uuid>>>,
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
-        current_task_state_cache: Arc<RwLock<Option<TaskDebugState>>>,
-        is_connected_status_for_cleanup: &Arc<RwLock<bool>>,
-        ws_send_channel_for_cleanup: &Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>, // **类型需确认**
-        heartbeat_task_handle_for_cleanup: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        current_group_id_for_cleanup: &Arc<RwLock<Option<String>>>,
-        current_task_id_for_cleanup: &Arc<RwLock<Option<String>>>,
-    ) {
-        info!("启动 WebSocket 消息接收循环...");
-        while let Some(message_result) = stream.next().await {
-            match message_result {
-                Ok(msg) => {
-                    match msg {
-                        TungsteniteMessage::Text(text) => {
-                            match serde_json::from_str::<WsMessage>(&text) {
-                                Ok(ws_msg) => {
-                                    Self::handle_on_message(
-                                        app_handle,
-                                        ws_msg,
-                                        cloud_assigned_client_id_state.clone(),
-                                        last_pong_received_at_clone.clone(),
-                                        current_task_state_cache.clone(),
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    error!("反序列化收到的文本消息为 WsMessage 失败: {}, 原始文本: {}", e, text);
+                    // --- 连接成功后的处理 (原 handle_on_open 逻辑) ---
+                    *is_connected_status_clone.write().await = true;
+                    // cloud_assigned_client_id 在注册响应后更新
+                    *last_pong_received_at_clone.write().await = Some(Utc::now());
+
+                    // 发送连接成功事件
+                    // **确保 WsConnectionStatusEvent 在 SatControlCenter 的 event.rs 中定义正确**
+        let event_payload = WsConnectionStatusEvent {
+            connected: true,
+                        error_message: Some("成功连接到云端WebSocket服务".to_string()),
+                        client_id: None, // 在 RegisterResponse 后才确定
+                    };
+                    // **确保 WS_CONNECTION_STATUS_EVENT 常量在 SatControlCenter 的 event.rs 中定义正确**
+                    if let Err(e) = app_handle_clone.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                        // **日志标识符已更改**
+                        error!(
+                            "[SatControlCenter] (连接任务) 发送 \"已连接\" 事件 ({}) 失败: {}", 
+                            WS_CONNECTION_STATUS_EVENT, e
+                        );
+                    }
+
+                    // 存储发送通道
+                    *ws_send_channel_clone.lock().await = Some(client_connection.ws_sender);
+
+                    // 启动心跳任务
+                    let hb_app_handle = app_handle_clone.clone();
+                    let hb_ws_send = ws_send_channel_clone.clone();
+                    let hb_last_pong = last_pong_received_at_clone.clone();
+                    let hb_is_connected = is_connected_status_clone.clone();
+                    let hb_cloud_id = cloud_assigned_client_id_clone.clone();
+                    let hb_task = tokio::spawn(async move {
+                        // 调用静态方法运行心跳循环
+                        Self::run_heartbeat_loop(
+                            hb_app_handle,
+                            hb_ws_send,
+                            hb_last_pong,
+                            hb_is_connected,
+                            hb_cloud_id,
+        ).await;
+                    });
+                    heartbeat_join_handle = Some(hb_task);
+
+                    // --- 消息接收循环 ---
+                    loop {
+                        tokio::select! {
+                            // 接收消息
+                            // 使用 rust_websocket_utils 提供的辅助函数接收和解析消息
+                            maybe_msg_result = transport::receive_message(&mut client_connection.ws_receiver) => {
+                                match maybe_msg_result {
+                                    Some(Ok(ws_msg)) => {
+                                        // --- 处理收到的消息 (原 handle_on_message 逻辑) ---
+                                         // 调用静态方法处理消息
+                                         Self::process_received_message(
+                                             &app_handle_clone,
+                                             ws_msg,
+                                             &cloud_assigned_client_id_clone, // 注意传递的是克隆的 Arc 引用
+                                             &last_pong_received_at_clone,
+                                             &local_task_state_cache_clone,
+                                         ).await;
+                                    }
+                                    Some(Err(e)) => {
+                                        // --- 处理接收或解析错误 (原 handle_on_error 部分逻辑) ---
+                                        // **日志标识符已更改**
+                                        error!("[SatControlCenter] (连接任务) 消息接收或解析时发生错误: {}", e);
+                                        final_error_message = Some(format!("接收消息时出错: {}", e));
+                                        break; // 发生错误，退出接收循环
+                                    }
+                                    None => {
+                                        // --- 连接已关闭 (原 handle_on_close 逻辑) ---
+                                        // **日志标识符已更改**
+                                        info!("[SatControlCenter] (连接任务) WebSocket 连接已由对端关闭。");
+                                        final_error_message = Some("连接已由对端关闭".to_string());
+                                        break; // 连接关闭，退出接收循环
+                                    }
                                 }
                             }
-                        }
-                        TungsteniteMessage::Binary(bin) => {
-                            warn!("收到未处理的二进制 WebSocket 消息，长度: {} bytes", bin.len());
-                        }
-                        TungsteniteMessage::Ping(_) => {
-                            debug!("收到 Ping 消息，自动由 tungstenite 回复 Pong。");
-                            *last_pong_received_at_clone.write().await = Some(Utc::now());
-                        }
-                        TungsteniteMessage::Pong(_) => {
-                            debug!("明确收到 Pong 消息");
-                            *last_pong_received_at_clone.write().await = Some(Utc::now());
-                        }
-                        TungsteniteMessage::Close(close_frame) => {
-                            info!("收到 Close 帧，WebSocket 连接正在关闭。帧信息: {:?}", close_frame);
-                            let reason = close_frame.map(|cf| format!("Code: {}, Reason: {}", cf.code, cf.reason));
-                            Self::handle_on_close(
-                                app_handle,
-                                reason,
-                                is_connected_status_for_cleanup,
-                                &cloud_assigned_client_id_state,
-                                ws_send_channel_for_cleanup,
-                                heartbeat_task_handle_for_cleanup,
-                                &last_pong_received_at_clone,
-                                current_group_id_for_cleanup,
-                                current_task_id_for_cleanup,
-                                &current_task_state_cache,
-                            ).await;
-                            break;
-                        }
-                        TungsteniteMessage::Frame(_) => {
-                            debug!("收到原始 WebSocket Frame，忽略。");
+                            // 检查外部断开信号 (通过 is_connected_status 标志)
+                            _ = async {
+                                 loop {
+                                     // 短暂休眠避免忙等待
+                                     tokio::time::sleep(Duration::from_millis(500)).await;
+                                     // 检查连接状态标志
+                                     if !*is_connected_status_clone.read().await {
+                                         break; // 如果状态变为 false，退出等待
+                                     }
+                                 }
+                            } => {
+                                 // **日志标识符已更改**
+                                 info!("[SatControlCenter] (连接任务) 检测到连接状态变为 false，主动退出任务。");
+                                 // 设置错误消息，除非已有更具体的错误
+                                 final_error_message = final_error_message.or_else(|| Some("连接被主动断开".to_string()));
+                                 break; // 退出 select 循环
+                            }
                         }
                     }
                 }
                 Err(e) => {
-                    let error_message_str = format!("WebSocket 接收流错误: {}", e);
-                    error!("{}", error_message_str);
-                    Self::handle_on_error(
-                        app_handle,
-                        error_message_str,
-                        is_connected_status_for_cleanup,
-                        &cloud_assigned_client_id_state,
-                        ws_send_channel_for_cleanup,
-                        heartbeat_task_handle_for_cleanup,
-                        &last_pong_received_at_clone,
-                        current_group_id_for_cleanup,
-                        current_task_id_for_cleanup,
-                        &current_task_state_cache,
-                    ).await;
-                    break;
+                    // --- 处理连接错误 (原 handle_on_error 部分逻辑) ---
+                    // **日志标识符已更改**
+                    error!("[SatControlCenter] (连接任务) 连接到 {} 失败: {}", url_string, e);
+                    final_error_message = Some(format!("连接失败: {}", e));
+                    // 连接失败，connection_attempt_successful 保持 false
+                }
+            }
+
+            // --- 清理阶段 (无论连接成功与否，或循环退出原因) ---
+            // **日志标识符已更改**
+            info!("[SatControlCenter] (连接任务) 进入清理阶段...");
+
+            // 停止心跳任务 (如果已启动)
+            if let Some(hb_handle) = heartbeat_join_handle {
+                // **日志标识符已更改**
+                info!("[SatControlCenter] (连接任务) 正在停止心跳任务...");
+                hb_handle.abort();
+                // 可以选择 await，但通常 abort 即可
+                 // 清理主服务中存储的心跳任务句柄
+                 let mut hb_guard = heartbeat_task_handle_clone.lock().await;
+                 if hb_guard.is_some() { *hb_guard = None; } 
+            }
+
+            // 更新最终连接状态
+            let was_connected = *is_connected_status_clone.read().await; // 记录断开前的状态
+            *is_connected_status_clone.write().await = false;
+            *cloud_assigned_client_id_clone.write().await = None;
+            *ws_send_channel_clone.lock().await = None;
+            *last_pong_received_at_clone.write().await = None;
+            // 注意：local_task_state_cache_clone 不需要在此处清除，可以保持最后的状态，直到下次成功注册
+
+            // 发送最终的连接状态事件 (只有在从未成功连接过，或者之前是连接状态时才发送)
+            if !connection_attempt_successful || was_connected {
+                // **确保 WsConnectionStatusEvent 定义正确**
+                let event_payload = WsConnectionStatusEvent {
+                    connected: false,
+                    // 提供最终的错误信息，或者默认的关闭信息
+                    error_message: final_error_message.or_else(|| Some("连接已关闭".to_string())), 
+                    client_id: None, // 断开时通常不需要发送 client_id
+                };
+                // **确保 WS_CONNECTION_STATUS_EVENT 常量定义正确**
+                if let Err(e) = app_handle_clone.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                    // **日志标识符已更改**
+                    error!(
+                        "[SatControlCenter] (连接任务-清理) 发送 \"连接关闭/失败\" 事件 ({}) 失败: {}",
+                        WS_CONNECTION_STATUS_EVENT, e
+                    );
+                }
+            }
+
+            // 从主服务中移除当前连接任务的任务句柄 (表示任务已结束)
+            let mut task_guard = connection_task_handle_clone.lock().await;
+            // 可以通过比较 JoinHandle 的 id 来确保移除的是正确的任务句柄，但 JoinHandle 不直接暴露 ID。
+            // 假设我们总是先取消旧任务再启动新任务，所以这里的 None 检查足够。
+             if task_guard.is_some() {
+                 *task_guard = None; // 移除句柄
+                 // **日志标识符已更改**
+                 info!("[SatControlCenter] (连接任务) 已清理自身在主服务中的任务句柄。");
+             } else {
+                 // **日志标识符已更改**
+                 // 这可能发生在任务完成前，新的 connect 调用覆盖了句柄
+                 info!("[SatControlCenter] (连接任务) 自身任务句柄已不在主服务中，可能已被新连接任务覆盖。");
+             }
+
+
+            // **日志标识符已更改**
+            info!("[SatControlCenter] (连接任务) 已完成。");
+        });
+
+        // 存储新启动的连接任务的句柄
+        let mut task_guard = self.connection_task_handle.lock().await;
+        *task_guard = Some(connection_task);
+        // **日志标识符已更改**
+        info!("[SatControlCenter] WebSocket 连接任务已成功启动并存储句柄。");
+
+        Ok(()) // 连接启动过程本身成功
+    }
+
+    /// 辅助函数：处理接收到的单个 WebSocket 消息。
+    /// 这是一个静态方法，因为它不直接修改 `self` 的状态，而是通过传入的 Arc 引用来操作。
+    async fn process_received_message(
+        app_handle: &AppHandle,
+        ws_msg: WsMessage,
+        cloud_assigned_client_id_state: &Arc<RwLock<Option<Uuid>>>,
+        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
+        local_task_state_cache_clone: &Arc<RwLock<Option<TaskDebugState>>>,
+    ) {
+        // **日志标识符已更改**
+        // 增加 Payload 摘要日志
+        info!(
+            "[SatControlCenter] (处理消息) 类型='{}', 消息ID='{}', 时间戳='{}', Payload摘要='{}'", 
+            ws_msg.message_type, ws_msg.message_id, ws_msg.timestamp, ws_msg.payload.chars().take(100).collect::<String>()
+        ); 
+
+        match ws_msg.message_type.as_str() {
+            // 处理 Echo 消息（通常是服务器对客户端 Ping 的响应，或测试消息）
+            // 根据 common_models 定义的消息类型常量进行匹配
+            common_models::ws_payloads::ECHO_MESSAGE_TYPE => {
+                 // 尝试将 payload 解析为 EchoPayload
+                 match serde_json::from_str::<common_models::ws_payloads::EchoPayload>(&ws_msg.payload) {
+                    Ok(echo_payload) => {
+                        // **日志标识符已更改**
+                        info!("[SatControlCenter] (处理消息) 成功解析 EchoPayload: {:?}", echo_payload);
+                        // 构建要发送给前端的事件 Payload
+                        // **确保 EchoResponseEventPayload 定义正确**
+                        let response_event_payload = EchoResponseEventPayload { content: echo_payload.content };
+                        // **确保 ECHO_RESPONSE_EVENT 常量定义正确**
+                        if let Err(e) = app_handle.emit_to("main", ECHO_RESPONSE_EVENT, &response_event_payload) {
+                             // **日志标识符已更改**
+                             error!("[SatControlCenter] (处理消息) 发送 Echo响应 ({}) 事件失败: {}", ECHO_RESPONSE_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        // **日志标识符已更改**
+                        error!("[SatControlCenter] (处理消息) 解析 EchoPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            // 处理 Pong 消息 (心跳响应)
+            PONG_MESSAGE_TYPE => {
+                // **日志标识符已更改**
+                info!("[SatControlCenter] (处理消息) 收到 Pong 消息。");
+                // 更新最后收到 Pong 的时间戳
+                *last_pong_received_at_clone.write().await = Some(Utc::now());
+            }
+            // 处理注册响应消息
+            REGISTER_RESPONSE_MESSAGE_TYPE => {
+                // 尝试解析为 RegisterResponsePayload
+                match serde_json::from_str::<RegisterResponsePayload>(&ws_msg.payload) {
+                    Ok(payload) => {
+                        // **日志标识符已更改**
+                        info!("[SatControlCenter] (处理消息) 收到并解析 RegisterResponsePayload: {:?}", payload);
+                        
+                        // 如果注册成功，存储云端分配的客户端 ID
+                        let mut assigned_id_str: Option<String> = None;
+                        if payload.success {
+                            let assigned_id = payload.assigned_client_id; // 是 Uuid 类型
+                            *cloud_assigned_client_id_state.write().await = Some(assigned_id);
+                            assigned_id_str = Some(assigned_id.to_string()); // 转换为字符串以匹配事件 Payload
+                            // **日志标识符已更改**
+                            info!("[SatControlCenter] (处理消息) 客户端注册成功，云端分配的客户端ID: {}", assigned_id);
+                        } else {
+                            // **日志标识符已更改**
+                            warn!("[SatControlCenter] (处理消息) 客户端注册失败。原因: {:?}", payload.message);
+                            // 注册失败，清除可能存在的旧 ID
+                            *cloud_assigned_client_id_state.write().await = None;
+                        }
+
+                        // 构建要发送给前端的事件 Payload
+                        // **确保 WsRegistrationStatusEventPayload 定义正确**
+                        let event_payload = WsRegistrationStatusEventPayload {
+                            success: payload.success,
+                            message: payload.message.clone(),
+                            group_id: payload.effective_group_id.clone(), // common_models::RegisterResponsePayload.effective_group_id 是 Option<String>
+                            task_id: None, // 当前逻辑中 task_id 不通过 RegisterResponsePayload 传递，保持 None
+                            assigned_client_id: assigned_id_str, // 使用转换后的 Option<String>
+                        };
+                        
+                        // 发送注册状态事件到前端
+                        // **确保 WS_REGISTRATION_STATUS_EVENT 常量定义正确**
+                        if let Err(e) = app_handle.emit_to("main", WS_REGISTRATION_STATUS_EVENT, &event_payload) {
+                            // **日志标识符已更改**
+                            error!("[SatControlCenter] (处理消息) 发送 WsRegistrationStatusEventPayload ({}) 事件失败: {}", WS_REGISTRATION_STATUS_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        // **日志标识符已更改**
+                        error!("[SatControlCenter] (处理消息) 解析 RegisterResponsePayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            // 处理伙伴状态更新消息
+            PARTNER_STATUS_UPDATE_MESSAGE_TYPE => {
+                // 尝试解析为 PartnerStatusPayload
+                match serde_json::from_str::<PartnerStatusPayload>(&ws_msg.payload) {
+                    Ok(payload) => {
+                        // **日志标识符已更改**
+                        info!("[SatControlCenter] (处理消息) 收到并解析 PartnerStatusPayload: {:?}", payload);
+                        // 构建事件 Payload 发送给前端
+                        // **确保 WsPartnerStatusEventPayload 定义正确**
+                        let event_payload = WsPartnerStatusEventPayload {
+                            // 注意：payload.partner_role 是 ClientRole 枚举，需要转换为字符串
+                            partner_role: payload.partner_role.to_string(), 
+                            is_online: payload.is_online,
+                        };
+                        // **确保 WS_PARTNER_STATUS_EVENT 常量定义正确**
+                        if let Err(e) = app_handle.emit_to("main", WS_PARTNER_STATUS_EVENT, &event_payload) {
+                            // **日志标识符已更改**
+                            error!("[SatControlCenter] (处理消息) 发送 WsPartnerStatusEventPayload ({}) 事件失败: {}", WS_PARTNER_STATUS_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        // **日志标识符已更改**
+                        error!("[SatControlCenter] (处理消息) 解析 PartnerStatusPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            // 处理任务状态更新消息 (来自云端的权威状态)
+            TASK_STATE_UPDATE_MESSAGE_TYPE => {
+                // 尝试解析为 TaskDebugState
+                match serde_json::from_str::<TaskDebugState>(&ws_msg.payload) {
+                    Ok(new_state) => {
+                        // **日志标识符已更改**
+                        info!("[SatControlCenter] (处理消息) 收到并解析 TaskDebugState (任务ID: {}), 最后更新者: {:?}, 更新时间戳: {}", 
+                            new_state.task_id, new_state.last_updated_by_role, new_state.last_update_timestamp
+                        );
+                        // 更新本地缓存的任务状态
+                        *local_task_state_cache_clone.write().await = Some(new_state.clone());
+                        
+                        // 构建事件 Payload 发送给前端
+                        // **确保 LocalTaskStateUpdatedEventPayload 定义正确**
+                        // 不再需要将 TaskDebugState 序列化为 serde_json::Value
+                        let event_payload = LocalTaskStateUpdatedEventPayload { new_state: new_state.clone() }; // 直接使用 new_state (TaskDebugState)
+                        // **确保 LOCAL_TASK_STATE_UPDATED_EVENT 常量定义正确**
+                        if let Err(e) = app_handle.emit_to("main", LOCAL_TASK_STATE_UPDATED_EVENT, &event_payload) {
+                            // **日志标识符已更改**
+                            error!("[SatControlCenter] (处理消息) 发送 LocalTaskStateUpdatedEventPayload ({}) 事件失败: {}", LOCAL_TASK_STATE_UPDATED_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        // **日志标识符已更改**
+                        error!("[SatControlCenter] (处理消息) 解析 TaskDebugState 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            // 处理未知或未实现的消息类型
+            unknown_type => {
+                // **日志标识符已更改**
+                warn!("[SatControlCenter] (处理消息) 收到未处理的 WebSocket 消息类型: '{}'", unknown_type);
+            }
+        }
+    }
+
+    /// 辅助函数：运行心跳循环。
+    /// 这是一个静态方法，在新连接建立后由 `connect` 中的任务 `tokio::spawn` 启动。
+    async fn run_heartbeat_loop(
+        app_handle: AppHandle, // 用于发送事件 (例如超时断开事件)
+        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>, // 发送 Ping
+        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>, // 检查 Pong 超时
+        is_connected_status_clone: Arc<RwLock<bool>>, // 检查连接状态，并在超时时设置为 false
+        _cloud_assigned_client_id_clone: Arc<RwLock<Option<Uuid>>>, // 保留以备将来使用 (例如 Ping 中携带 client_id)
+    ) {
+        // **日志标识符已更改**
+        info!("[SatControlCenter] (心跳任务) 启动。");
+        // 创建一个定时器，每隔 HEARTBEAT_INTERVAL_SECONDS 秒触发一次
+        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
+            loop {
+            interval.tick().await; // 等待下一个心跳间隔
+
+            // 1. 检查连接状态，如果已断开则退出心跳循环
+                if !*is_connected_status_clone.read().await {
+                // **日志标识符已更改**
+                info!("[SatControlCenter] (心跳任务) 检测到连接已断开，退出心跳循环。");
+                    break; // 退出循环
+                }
+
+            // 2. 检查 Pong 响应是否超时
+            let now = Utc::now();
+                let last_pong_time = *last_pong_received_at_clone.read().await;
+                if let Some(last_pong) = last_pong_time {
+                // 如果当前时间距离上次收到 Pong 的时间超过了 心跳间隔 + Pong超时容忍时间
+                // 使用 chrono::Duration 进行时间差比较
+                if now.signed_duration_since(last_pong) > chrono::Duration::seconds((HEARTBEAT_INTERVAL_SECONDS + PONG_TIMEOUT_SECONDS) as i64) {
+                    // **日志标识符已更改**
+                    warn!(
+                        "[SatControlCenter] (心跳任务) Pong 响应超时 (最后一次收到 Pong 是在: {:?}, 当前时间: {:?})。将触发断开连接处理。",
+                        last_pong, now
+                    );
+                    // 发送连接错误事件到前端，告知用户连接可能已断开
+                    // **确保 WsConnectionStatusEvent 定义正确**
+                    let event_payload = WsConnectionStatusEvent { 
+                        connected: false,
+                        error_message: Some("心跳响应超时，连接可能已断开".to_string()),
+                        client_id: None, // 断开时清除 ID
+                    };
+                    // **确保 WS_CONNECTION_STATUS_EVENT 常量定义正确**
+                    if let Err(e) = app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                        // **日志标识符已更改**
+                        error!("[SatControlCenter] (心跳任务) 发送 Pong 超时断开事件失败: {}", e);
+                    }
+                    // 将主连接状态设置为 false，这将使得主连接任务 (在 connect 中) 检测到并退出清理
+                    *is_connected_status_clone.write().await = false;
+                    // **日志标识符已更改**
+                    info!("[SatControlCenter] (心跳任务) 因 Pong 超时，已将连接状态设为 false，退出心跳循环。");
+                    break; // 退出心跳循环
+            }
+        } else {
+                // 如果从未收到过 Pong (last_pong_received_at 仍为 None)，但连接已建立一段时间，也可能表示有问题
+                // 但首次 Ping 可能还未收到响应，所以这里暂时不处理 None 的情况，依赖后续的超时
+                // **日志标识符已更改**
+                debug!("[SatControlCenter] (心跳任务) 尚未收到任何 Pong 响应。");
+            }
+            
+            // 3. 发送 Ping 消息
+            // 构建 PingPayload (通常为空结构体)
+            let ping_payload = PingPayload {}; 
+            // 使用 WsMessage 构造器创建消息
+            match WsMessage::new(PING_MESSAGE_TYPE.to_string(), &ping_payload) {
+                Ok(ws_message) => {
+                    // **日志标识符已更改**
+                    info!(
+                        "[SatControlCenter] (心跳任务) 准备发送 Ping 消息 (ID: {}, Type: {}) 到云端...",
+                        ws_message.message_id, ws_message.message_type
+                    );
+                    // 获取发送通道的锁
+                    if let Some(sender) = ws_send_channel_clone.lock().await.as_mut() {
+                         // 将 WsMessage 序列化为 JSON 字符串
+                         match serde_json::to_string(&ws_message) { 
+                             Ok(msg_json) => {
+                                // 使用 Tokio-Tungstenite 的 Sink 发送 Text 消息
+                                match sender.send(TungsteniteMessage::Text(msg_json)).await { 
+                                Ok(_) => {
+                                        // **日志标识符已更改**
+                                        info!("[SatControlCenter] (心跳任务) Ping 消息已成功发送。");
+                                        // 发送成功后，可以稍微提前更新 last_pong_received_at 的"预期"时间，
+                                        // 或者依赖严格的超时检查。
+                                        // 为简单起见，此处不更新，等待 Pong 回复来实际更新。
+                                }
+            Err(e) => {
+                                        // **日志标识符已更改**
+                                        error!("[SatControlCenter] (心跳任务) 发送 Ping 消息失败: {}", e);
+                                        // 发送失败通常意味着底层连接已断开
+                                        // 立即将连接状态设为 false，让主任务退出清理
+                                        *is_connected_status_clone.write().await = false;
+                                        // **日志标识符已更改**
+                                        info!("[SatControlCenter] (心跳任务) 因 Ping 发送失败，已将连接状态设为 false，退出心跳循环。");
+                                        break; // 退出循环
+                                    }
+                                }
+                                }
+                                Err(e) => {
+                                // **日志标识符已更改**
+                                error!("[SatControlCenter] (心跳任务) 序列化 Ping WsMessage 失败: {}", e);
+                                // 序列化失败是内部错误，不直接退出，但需要记录
+                            }
+                        }
+                    } else {
+                        // 如果发送通道不可用 (通常是 None)，说明连接已断开
+                        // **日志标识符已更改**
+                        warn!("[SatControlCenter] (心跳任务) WebSocket 发送通道不可用，无法发送 Ping。退出心跳循环。");
+                        break; // 退出循环
+                    }
+                }
+                Err(e) => {
+                    // **日志标识符已更改**
+                    error!("[SatControlCenter] (心跳任务) 创建 Ping WsMessage 失败: {}", e);
+                    // 创建消息失败是内部错误，记录但不退出循环
                 }
             }
         }
-        info!("WebSocket 消息接收循环结束。");
+        // **日志标识符已更改**
+        info!("[SatControlCenter] (心跳任务) 已结束。");
     }
 
-    /// 断开当前的 WebSocket 连接。
+    /// 请求断开当前的 WebSocket 连接。
     ///
-    /// 供 Tauri 命令 (`disconnect_from_cloud`) 调用。
+    /// 这会设置内部状态以指示断开，并通知正在运行的连接任务退出。
+    ///
+    /// # 返回
+    /// * `Result<(), String>`: 如果请求处理成功，则返回 `Ok(())`。
     pub async fn disconnect(&self) -> Result<(), String> {
-        info!("WebSocket 服务收到断开连接请求。");
+        // **日志标识符已更改**
+        info!("[SatControlCenter] WebSocketClientService::disconnect 被调用。");
+        // 获取连接状态的写锁
+        let mut is_connected_guard = self.is_connected_status.write().await;
+        // 检查当前是否处于连接状态
+        if *is_connected_guard {
+            // **日志标识符已更改**
+            info!("[SatControlCenter] 当前处于连接状态，准备断开...");
+            // 设置状态为 false，这将作为信号被 connect 中的主循环检测到
+            *is_connected_guard = false; 
+            // 显式释放锁，以便其他任务可以继续（如下面的发送 Close 帧）
+            drop(is_connected_guard); 
 
-        // 停止心跳任务
-        Self::stop_heartbeat_task_static(
-            &self.heartbeat_task_handle,
-            &self.last_pong_received_at,
-        )
-        .await;
-
-        // 中止连接任务 (如果有)
-        let mut conn_handle_guard = self.connection_task_handle.lock().await;
-        if let Some(handle) = conn_handle_guard.take() {
-            info!("正在中止 WebSocket 连接任务...");
-            handle.abort();
-            match handle.await {
-                Ok(_) => info!("连接任务已成功中止。"),
-                Err(e) if e.is_cancelled() => info!("连接任务已成功中止 (cancelled)。"),
-                Err(e) => warn!("等待连接任务中止时发生错误: {:?}", e),
+            // （可选但推荐）尝试向服务器发送一个 Close 帧，进行优雅关闭
+            let mut sender_guard = self.ws_send_channel.lock().await;
+            if let Some(sender) = sender_guard.as_mut() {
+                // **日志标识符已更改**
+                info!("[SatControlCenter] 尝试向服务器发送 Close 帧...");
+                // 使用 SinkExt 的 close() 方法来发送 Close 帧
+                match sender.close().await {
+                   // **日志标识符已更改**
+                   Ok(_) => info!("[SatControlCenter] Close 帧已发送或请求已发出。"),
+                   // **日志标识符已更改**
+                   Err(e) => warn!("[SatControlCenter] 发送 Close 帧失败（可能连接已断开）: {}", e),
+                }
             }
-        } else {
-            debug!("没有活动的连接任务需要中止。");
-        }
+            // 释放发送通道的锁
+            drop(sender_guard);
 
-        // 清理状态变量 (已在 handle_on_close/error 中处理，但这里可以作为保险)
-        let was_connected = *self.is_connected_status.read().await;
-        if was_connected {
-            *self.is_connected_status.write().await = false;
-             let old_client_id = self.cloud_assigned_client_id.write().await.take();
-             *self.ws_send_channel.lock().await = None; // 确保清理
-             *self.current_group_id.write().await = None;
-             *self.current_task_id.write().await = None;
-             *self.current_task_state.write().await = None;
+            // (可选) 也可以立即中止连接任务句柄，但这可能不如让任务自己检测到状态变化后退出优雅。
+            // relying on the is_connected flag is generally preferred for graceful shutdown.
+             let mut task_guard = self.connection_task_handle.lock().await;
+             if let Some(handle) = task_guard.as_ref() {
+                 // **日志标识符已更改**
+                 info!("[SatControlCenter] (disconnect) 请求中止连接任务...");
+                 handle.abort(); // 请求任务取消
+             }
+             // 不在此处移除句柄 (*task_guard = None;)，让任务自己在退出时清理
+             drop(task_guard);
 
-            // 发送连接关闭事件给前端
+
+            // 发送断开事件到前端，提供即时反馈
+            // 注意：连接任务的清理阶段也会发送最终状态事件，这里发送是为了更快响应用户操作
+            // **确保 WsConnectionStatusEvent 定义正确**
             let event_payload = WsConnectionStatusEvent {
                 connected: false,
-                client_id: old_client_id.map(|id| id.to_string()),
-                error_message: Some("用户请求断开连接".to_string()),
+                error_message: Some("客户端主动断开连接".to_string()),
+                client_id: None, // 断开时 client_id 无意义
             };
-            // **使用 emit**
-            if let Err(e) = self.app_handle.emit(WS_CONNECTION_STATUS_EVENT, event_payload) {
-                error!("向前端发送 WebSocket 用户断开事件失败: {}", e);
-            }
-            info!("WebSocket 连接已根据用户请求断开。");
+            // **确保 WS_CONNECTION_STATUS_EVENT 常量定义正确**
+            if let Err(e) = self.app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                // **日志标识符已更改**
+                error!(
+                    "[SatControlCenter] 发送 \"主动断开\" 事件到前端失败: {}",
+                    e
+                );
         } else {
-            info!("WebSocket 本身未连接，无需断开。");
-        }
-
+                // **日志标识符已更改**
+                info!("[SatControlCenter] 已向前端发送主动断开事件。");
+            }
+             Ok(()) // 断开请求处理成功
+        } else {
+             // 如果当前未连接，无需执行断开操作
+             drop(is_connected_guard); // 释放锁
+             // **日志标识符已更改**
+             info!("[SatControlCenter] 当前未连接，无需执行断开操作。");
         Ok(())
+        }
     }
 
     /// 检查当前 WebSocket 是否已连接。
+    ///
+    /// # 返回
+    /// * `bool`: 如果连接状态标志为 `true`，则返回 `true`；否则返回 `false`。
     pub async fn is_connected(&self) -> bool {
+        // 读取连接状态标志 (使用读锁)
         *self.is_connected_status.read().await
     }
 
-    /// 向 WebSocket 发送一个 `WsMessage`。
+    /// 向 WebSocket 服务器发送一个 `WsMessage`。
     ///
-    /// 供 Tauri 命令 (`send_ws_echo`, `register_client_with_task` 等) 调用。
-    /// 负责将 `WsMessage` 序列化为 JSON 字符串，并将其作为 `Text` 消息发送出去。
+    /// # 参数
+    /// * `message` - 要发送的 `WsMessage` 实例。
+    ///
+    /// # 返回
+    /// * `Result<(), String>`: 如果消息成功序列化并放入发送队列，则返回 `Ok(())`。
+    ///   如果当前未连接、序列化失败或发送时发生错误，则返回包含错误描述的 `Err(String)`。
     pub async fn send_ws_message(&self, message: WsMessage) -> Result<(), String> {
-        debug!(
-            "尝试发送 WebSocket 消息: 类型='{}', ID={}",
-            message.message_type,
-            message.message_id
+        // **日志标识符已更改**
+        info!(
+            "[SatControlCenter] WebSocketClientService::send_ws_message 调用，准备发送类型: {}, ID: {}", 
+            message.message_type, message.message_id
         );
-
-        // 检查连接状态
+        // 检查当前是否已连接
         if !self.is_connected().await {
-            let err_msg = format!(
-                "无法发送类型为 '{}' 的消息：WebSocket 未连接。",
-                message.message_type
-            );
-            warn!("{}", err_msg);
+            let err_msg = "无法发送消息：WebSocket 未连接。".to_string();
+            // **日志标识符已更改**
+            error!("[SatControlCenter] {}", err_msg);
             return Err(err_msg);
         }
 
-        // 序列化 WsMessage 为 JSON 字符串
-        let message_str = match serde_json::to_string(&message) {
-            Ok(s) => s,
-            Err(e) => {
-                let err_msg = format!(
-                    "序列化类型为 '{}' 的 WsMessage 失败: {}",
-                    message.message_type, e
-                );
-                error!("{}", err_msg);
-                return Err(err_msg);
-            }
-        };
-
-        // 获取发送通道的锁
+        // 获取发送通道的互斥锁
         let mut sender_guard = self.ws_send_channel.lock().await;
-
-        // 检查发送通道是否有效
+        // 检查发送通道是否存在 (是否为 Some)
         if let Some(sender) = sender_guard.as_mut() {
-            // 发送 Text 消息
-            match sender.send(TungsteniteMessage::Text(message_str)).await {
+            // 将 WsMessage 序列化为 JSON 字符串
+            match serde_json::to_string(&message) {
+                Ok(msg_json) => {
+                    // 使用 Sink 发送 Text 消息
+                    match sender.send(TungsteniteMessage::Text(msg_json)).await {
                 Ok(_) => {
-                    debug!(
-                        "类型为 '{}' 的消息已成功提交到发送队列。",
-                        message.message_type
-                    );
-                    Ok(())
+                            // **日志标识符已更改**
+                            info!("[SatControlCenter] 消息 (类型: {}, ID: {}) 已成功发送。", message.message_type, message.message_id);
+                            Ok(()) // 发送成功
                 }
                 Err(e) => {
-                    let err_msg = format!(
-                        "发送类型为 '{}' 的消息失败: {}",
-                        message.message_type, e
-                    );
-                    error!("{}", err_msg);
-                    // 发送失败可能意味着连接已断开，需要处理状态
-                    // TODO: 考虑在这里主动调用 disconnect 或 handle_on_error
-                    Err(err_msg)
+                            // 发送失败，可能连接已在此过程中断开
+                            let err_msg = format!("发送 WebSocket 消息时发生错误: {}", e);
+                            // **日志标识符已更改**
+                            error!("[SatControlCenter] {}", err_msg);
+                            // 标记连接为断开状态，以便主任务进行清理
+                            *self.is_connected_status.write().await = false;
+                            Err(err_msg) // 返回错误
+                        }
+                    }
+                }
+                Err(e) => {
+                    // 序列化失败是内部错误
+                    let err_msg = format!("序列化 WsMessage 失败: {}", e);
+                    // **日志标识符已更改**
+                    error!("[SatControlCenter] {}", err_msg);
+                    Err(err_msg) // 返回错误
                 }
             }
         } else {
-            // 如果没有发送通道
-            let err_msg = format!(
-                "无法发送类型为 '{}' 的消息：发送通道不可用。",
-                message.message_type
-            );
-            error!("{}", err_msg);
-            // 在这里也应该考虑清理状态
-            Err(err_msg)
+            // 如果发送通道是 None，说明连接已断开
+            let err_msg = "无法发送消息：WebSocket 发送通道不可用 (可能已断开)。".to_string();
+            // **日志标识符已更改**
+            error!("[SatControlCenter] {}", err_msg);
+            // 确保状态反映为断开
+            *self.is_connected_status.write().await = false;
+            Err(err_msg) // 返回错误
         }
     }
 
-     // 辅助方法：克隆服务状态，用于在异步回调中捕获 self
-     // **移除 Clone 方法，因为 WebSocketClientService 不容易实现 Clone**
-     // fn clone_service_state(&self) -> Self { ... }
+     /// 获取当前缓存的任务调试状态。
+     /// 
+     /// # 返回
+     /// * `Option<TaskDebugState>`: 如果本地有缓存的状态，则返回其克隆；否则返回 `None`。
+     pub async fn get_cached_task_state(&self) -> Option<TaskDebugState> {
+        // 使用读锁访问缓存
+        self.local_task_state_cache.read().await.clone()
+    }
 }
 
-// 实现 Drop trait 以确保在服务实例被销毁时进行清理
-// impl Drop for WebSocketClientService {
-//     fn drop(&mut self) {
-//         info!("WebSocketClientService 即将被 Drop，执行清理操作...");
-//         // 注意：drop 是同步执行的，不能直接调用 async 方法
-//         // 需要在运行时显式调用异步的 disconnect 方法来正确清理
-//         // 或者使用 tokio::runtime::Handle::block_on 来运行异步清理代码（但不推荐在 drop 中这样做）
-//         if self.connection_task_handle.try_lock().unwrap().is_some() || self.heartbeat_task_handle.try_lock().unwrap().is_some() {
-//              warn!("WebSocketClientService 被 Drop 时仍有活动的后台任务！可能导致资源泄露。请确保在销毁前调用 disconnect()。");
-//         }
-//         // 理论上，Arc 包裹的状态会在最后一个 Arc 引用消失时自动释放
-//         info!("WebSocketClientService Drop 完成。");
+// 注意：如果 WebSocketClientService::new 需要 app_handle，则不能直接 Default。
+// Tauri 的 State 管理通常在 setup 中创建并 manage，所以 Default 可能不需要。
+// impl Default for WebSocketClientService {
+//     fn default() -> Self {
+//         panic!("WebSocketClientService 不能在没有 AppHandle 的情况下 Default::default() 创建");
 //     }
 // }

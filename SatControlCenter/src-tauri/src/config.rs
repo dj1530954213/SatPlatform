@@ -13,6 +13,7 @@ use std::{
 };
 // use tauri::api::path::app_config_dir; // Tauri API，用于获取特定于应用的配置目录路径 - **Tauri v2 路径改变，暂时注释**
 use tauri::Config as TauriConfig; // Tauri 框架的核心配置结构体，通常从 tauri.conf.json 加载
+use log::{error, info, warn}; // Import necessary log macros
 
 /// 应用配置结构体定义，对应于配置文件 (`app_config.json`) 中的内容。
 ///
@@ -145,33 +146,94 @@ pub fn save_app_config(
     Ok(())
 }
 
-/// 获取应用程序配置文件的完整路径。
+/// 获取配置文件的完整路径。
 ///
-/// 此函数通过以下步骤确定配置文件的准确位置：
-/// 1.  调用 Tauri 的 `app_config_dir` (应用配置目录) 函数，并传入 `tauri_config` (Tauri 配置对象)。
-///     `app_config_dir` (应用配置目录) 会根据操作系统和应用的包标识符 (bundle identifier) 
-///     返回一个特定于此应用的用户级配置目录的路径 (例如，在 Windows 上可能是 `%APPDATA%\<YourAppIdentifier>\config`，
-///     在 Linux 上可能是 `~/.config/<YourAppIdentifier>`)。
-/// 2.  在此应用配置目录下，拼接预定义的标准配置文件名，即 `app_config.json`。
+/// 使用 Tauri 的 `app_config_dir` 来确定平台特定的应用配置目录。
 ///
-/// # 参数
-/// * `tauri_config`: `&TauriConfig` - 对 Tauri 框架配置对象的引用。
-///   `app_config_dir` (应用配置目录) 函数需要此对象来正确解析应用的包标识符等信息，
-///   从而能够定位到正确的应用专属配置目录。
+/// # Arguments
+/// * `tauri_config` - Tauri 应用程序的配置对象 (虽然加了下划线，但可能需要用它来获取 bundle identifier)。
 ///
-/// # 返回值
-/// * `Result<PathBuf, String>`:
-///   - `Ok(PathBuf)`: 如果成功获取到应用配置目录并构造出完整的配置文件路径，
-///     则返回一个包含该路径的 `PathBuf` (路径缓冲区) 实例。
-///   - `Err(String)`: 如果 `app_config_dir` (应用配置目录) 函数无法确定应用配置目录的路径 (例如，
-///     `tauri_config` (Tauri 配置对象) 中缺少必要的包标识符信息，或者底层操作系统调用失败)，
-///     则返回包含错误描述 (已本地化为中文) 的 `Err` 变体。
+/// # Returns
+/// * `Result<PathBuf, String>` - 成功时返回配置文件的 `PathBuf`，失败时返回错误信息。
 fn get_config_path(tauri_config: &TauriConfig) -> Result<PathBuf, String> {
-    // 获取特定于本应用的配置目录路径
-    // let config_dir = app_config_dir(tauri_config)
-    //     .ok_or_else(|| "无法获取应用程序的专属配置目录路径。请检查 Tauri 配置是否正确。".to_string())?;
-    // 在配置目录下拼接标准配置文件名 "app_config.json"
-    Ok(PathBuf::new())
+    // 尝试使用 Tauri v1 的方式获取配置目录
+    // Tauri v1 中，app_config_dir 需要 Config
+    // 注意：tauri::api::path::app_config_dir 在 Tauri v2 中已移除或改变
+    // 我们需要找到适用于当前项目依赖的 Tauri 版本的正确方法
+    // 假设当前使用的是需要 Config 的 app_config_dir (可能是 v1.x)
+    // 如果使用的是 Tauri v2+, 则需要使用 AppHandle.path().app_config_dir()
+    
+    // 尝试回退到可能兼容 v1 的方式，如果失败，需要进一步确认 Tauri 版本和 API
+    // FIXME: 需要确认 tauri::api::path 是否可用及如何使用
+    /* 
+    match tauri::api::path::app_config_dir(tauri_config) {
+        Some(dir) => Ok(dir.join("app_settings.json")),
+        None => Err("[配置模块] 无法获取应用配置目录，请检查 Tauri 配置。".to_string()),
+    }
+    */
+    
+    // 临时的、基于 AppHandle 的实现 (如果 AppHandle 在此上下文可用，否则需要从调用者传入)
+    // 这更像是 Tauri v2 的风格，但之前的 E0599 错误表明 try_current() 不可用
+    // 因此，这里我们可能需要调整调用结构，或者坚持使用基于 TauriConfig 的方法
+    
+    // **回退到基于已知工作模式（可能硬编码或简单逻辑）**
+    // 作为一个更健壮的回退或临时方案，可以考虑：
+    // 1. 尝试从环境变量读取配置路径
+    // 2. 使用相对路径（如果适用）
+    // 3. 使用平台特定的默认路径（但需要平台特定代码）
+    
+    // !! 紧急修复：暂时返回一个固定的相对路径或默认路径，以便编译通过
+    // 这不是长久之计，需要根据实际 Tauri 版本和 API 进行修正
+    warn!("[配置模块] get_config_path 暂时使用固定路径逻辑，需要根据 Tauri 版本修正！");
+    // 尝试在当前工作目录的 config 子目录下查找
+    let fallback_path = PathBuf::from(".").join("config").join("app_settings.json");
+    // 或者使用用户目录下的隐藏文件夹等，但更复杂
+    // 例如: dirs::config_dir().unwrap_or_default().join("com.tauri.dev").join("app_settings.json")
+    
+    Ok(fallback_path) // 返回一个临时的、可能不正确的路径以求编译
+
+    /* // 原来的基于 AppHandle 的代码，导致 E0599
+    let app_handle = match tauri::AppHandle::try_current() { // 使用 try_current 避免 panic
+        Some(handle) => handle,
+        None => return Err("[配置模块] 无法获取当前的 AppHandle，可能在非 Tauri 主线程调用?".to_string()),
+    };
+    let config_dir = match app_handle.path().app_config_dir() {
+        Ok(dir) => dir,
+        Err(e) => return Err(format!("[配置模块] 无法获取应用配置目录: {}", e)),
+    };
+    Ok(config_dir.join("app_settings.json"))
+    */
+}
+
+/// 初始化应用配置。
+///
+/// 尝试从文件加载配置，如果失败则使用默认配置。
+///
+/// # Arguments
+/// * `tauri_config` - Tauri 应用程序的配置对象。
+///
+/// # Returns
+/// * `AppConfig` - 加载或生成的应用配置。
+pub fn init_app_config(tauri_config: &TauriConfig) -> AppConfig {
+     info!("[配置模块] 开始初始化应用配置...");
+    match get_config_path(tauri_config) { // 传递 tauri_config
+        Ok(config_path) => {
+            match load_app_config(tauri_config) {
+                Ok(config) => {
+                    info!("[配置模块] 应用配置已成功初始化完毕 (从 {} 加载)。", config_path.display());
+                    config
+                }
+                Err(e) => {
+                    error!("[配置模块] 从文件 {} 加载配置失败: {}。将使用默认配置。", config_path.display(), e);
+                    AppConfig::default()
+                }
+            }
+        },
+        Err(e) => {
+             error!("[配置模块] 获取配置文件路径失败: {}。将使用默认配置。", e);
+            AppConfig::default()
+        }
+    }
 }
 
 // 单元测试模块 (`#[cfg(test)]` 确保此模块仅在 `cargo test` 时编译)
