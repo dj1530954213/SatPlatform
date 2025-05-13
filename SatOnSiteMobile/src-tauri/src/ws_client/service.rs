@@ -6,8 +6,9 @@
 //! 包括连接建立、断开、消息收发、状态同步以及心跳维持。
 
 use anyhow::Result;
-use log::{debug, error, info};
-use rust_websocket_utils::client::transport::{connect_client, ClientConnection, receive_message, ClientWsStream};
+use log::{debug, error, info, warn};
+use rust_websocket_utils::client::transport;
+use rust_websocket_utils::client::transport::ClientWsStream;
 use rust_websocket_utils::message::WsMessage;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{RwLock};
@@ -18,9 +19,26 @@ use tokio_tungstenite::tungstenite::protocol::Message as TungsteniteMessage;
 use futures_util::SinkExt;
 use chrono::{Utc, DateTime};
 use std::time::Duration;
+use uuid::Uuid;
 
-use crate::event::{WS_CONNECTION_STATUS_EVENT, WsConnectionStatusEvent, ECHO_RESPONSE_EVENT, EchoResponseEventPayload};
-use common_models::{self, ws_payloads::{PING_MESSAGE_TYPE, PONG_MESSAGE_TYPE, PingPayload}};
+use crate::event::{
+    WS_CONNECTION_STATUS_EVENT, WsConnectionStatusEvent, ECHO_RESPONSE_EVENT, EchoResponseEventPayload,
+    WS_REGISTRATION_STATUS_EVENT, WsRegistrationStatusEventPayload,
+    WS_PARTNER_STATUS_EVENT, WsPartnerStatusEventPayload,
+    LOCAL_TASK_STATE_UPDATED_EVENT, LocalTaskStateUpdatedEventPayload,
+    // WS_SERVER_ERROR_EVENT, WsServerErrorEventPayload,
+};
+use common_models::{
+    self,
+    ws_payloads::{
+        PING_MESSAGE_TYPE, PONG_MESSAGE_TYPE, PingPayload,
+        REGISTER_RESPONSE_MESSAGE_TYPE, RegisterResponsePayload,
+        PARTNER_STATUS_UPDATE_MESSAGE_TYPE, PartnerStatusPayload,
+        TASK_STATE_UPDATE_MESSAGE_TYPE,
+        ERROR_RESPONSE_MESSAGE_TYPE, ErrorResponsePayload,
+    },
+    TaskDebugState,
+};
 
 // 心跳机制相关常量
 /// 心跳发送间隔，单位：秒。
@@ -41,11 +59,11 @@ pub struct WebSocketClientService {
     /// 使用 `Arc<TokioMutex<Option<...>>>` 以允许在异步任务间共享和修改。
     /// `Option` 表示连接可能尚未建立或已断开。
     ws_send_channel: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-    /// 云端分配给此客户端的唯一标识符。
+    /// 云端分配给此客户端的唯一标识符 (UUID)。
     ///
-    /// 在成功连接并注册后，由云端分配。
-    /// 使用 `Arc<RwLock<Option<...>>>` 以便在异步回调中安全地更新和读取。
-    cloud_assigned_client_id: Arc<RwLock<Option<String>>>,
+    /// 在成功连接并注册后，由云端分配 (通过 RegisterResponse 确认)。
+    /// 使用 `Arc<RwLock<Option<Uuid>>>` 以便在异步回调中安全地更新和读取。
+    cloud_assigned_client_id: Arc<RwLock<Option<Uuid>>>,
     /// Tauri 应用句柄。
     ///
     /// 用于向前端发送事件和管理应用状态。
@@ -68,6 +86,11 @@ pub struct WebSocketClientService {
     ///
     /// 用于心跳机制中检测连接是否仍然活跃。
     last_pong_received_at: Arc<RwLock<Option<DateTime<Utc>>>>,
+    /// 本地缓存的、从云端同步过来的权威任务状态。
+    ///
+    /// 当收到云端的 "TaskStateUpdate" 消息时，此状态会被更新。
+    /// 前端可以通过监听 `LocalTaskStateUpdatedEvent` 事件来获取最新的状态。
+    local_task_state_cache: Arc<RwLock<Option<TaskDebugState>>>,
 }
 
 impl WebSocketClientService {
@@ -85,662 +108,583 @@ impl WebSocketClientService {
         Self {
             ws_send_channel: Arc::new(TokioMutex::new(None)),
             cloud_assigned_client_id: Arc::new(RwLock::new(None)),
-            app_handle, // 存储传入的 app_handle
+            app_handle,
             is_connected_status: Arc::new(RwLock::new(false)),
             connection_task_handle: Arc::new(TokioMutex::new(None)),
             heartbeat_task_handle: Arc::new(TokioMutex::new(None)),
             last_pong_received_at: Arc::new(RwLock::new(None)),
+            local_task_state_cache: Arc::new(RwLock::new(None)),
         }
     }
 
-    // --- 静态版本的 transport layer 回调辅助函数 ---
-    // 这些函数被设计为静态的，以便可以作为参数传递给 `connect_client`，
-    // 同时通过克隆和传递必要的 Arc<State> 来访问和修改服务状态。
-
-    /// WebSocket 连接成功打开时的静态回调处理函数。
+    /// 尝试连接到指定的 WebSocket 服务器 URL。
     ///
-    /// 此函数在 `connect_client` 内部的连接成功建立后被调用。
-    /// 它会更新连接状态，存储云端分配的客户端ID（如果提供），
-    /// 发送连接成功事件到前端，并启动心跳任务。
+    /// 此方法会启动一个后台异步任务来处理 WebSocket 连接的整个生命周期，
+    /// 包括建立连接、接收消息、处理心跳、以及处理断开或错误。
+    /// 状态变更会通过 Tauri 事件通知前端。
     ///
     /// # 参数
-    /// * `app_handle` - Tauri 应用句柄。
-    /// * `cloud_client_id` - 云端在连接时可能分配的客户端 ID。
-    /// * `is_connected_status` - 指向服务内部连接状态的 `Arc<RwLock<bool>>`。
-    /// * `cloud_assigned_client_id_state` - 指向服务内部存储云端客户端ID的 `Arc<RwLock<Option<String>>>`。
-    /// * `ws_send_channel_clone` - 指向服务内部发送通道的 `Arc<TokioMutex<Option<SplitSink>>>`，用于心跳任务。
-    /// * `heartbeat_task_handle_clone` - 指向心跳任务句柄的 `Arc<TokioMutex<Option<JoinHandle>>>`。
-    /// * `last_pong_received_at_clone` - 指向最后收到Pong时间的 `Arc<RwLock<Option<DateTime>>>`。
-    async fn handle_on_open(
-        app_handle: &AppHandle,
-        cloud_client_id: Option<String>,
-        is_connected_status: &Arc<RwLock<bool>>,
-        cloud_assigned_client_id_state: &Arc<RwLock<Option<String>>>,
-        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
-    ) {
-        info!("[SatOnSiteMobile] (静态回调) WebSocket 连接已成功打开。云端客户端ID (若连接时分配): {:?}", cloud_client_id);
-        *is_connected_status.write().await = true;
-        *cloud_assigned_client_id_state.write().await = cloud_client_id.clone(); // 克隆 cloud_client_id 以存储
-        *last_pong_received_at_clone.write().await = Some(Utc::now()); // 初始化Pong接收时间
-
-        // 构建并发送连接状态事件到前端
-        let event_payload = WsConnectionStatusEvent {
-            connected: true,
-            error_message: Some("成功连接到云端".to_string()), // 提供更友好的中文消息
-            client_id: cloud_client_id.clone(), // 再次克隆 cloud_client_id 用于事件
-        };
-        if let Err(e) = app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-            error!("[SatOnSiteMobile] (静态回调) 发送"已连接"事件到前端失败: {}", e);
-        }
-
-        info!("[SatOnSiteMobile] (handle_on_open) 准备启动心跳任务...");
-        // 启动心跳任务
-        Self::start_heartbeat_task_static(
-            app_handle.clone(), // 克隆 app_handle 以传递给新任务
-            ws_send_channel_clone, // 传递 Arc 引用
-            heartbeat_task_handle_clone, // 传递 Arc 引用
-            last_pong_received_at_clone, // 传递 Arc 引用
-            is_connected_status.clone(), // 克隆 Arc 引用
-            cloud_assigned_client_id_state.clone(), // 克隆 Arc 引用
-        ).await;
-
-        info!("[SatOnSiteMobile] (handle_on_open) 心跳任务启动流程调用完成。");
-    }
-
-    /// 从云端接收到 WebSocket 消息时的静态回调处理函数。
-    ///
-    /// 此函数在 `connect_client` 内部的 `receive_message` 任务接收到新消息时被调用。
-    /// 它会根据消息类型进行分发处理，例如处理 Echo 回复或 Pong 消息。
-    ///
-    /// # 参数
-    /// * `app_handle` - Tauri 应用句柄。
-    /// * `ws_msg` - 从云端接收到的 `WsMessage`。
-    /// * `_cloud_assigned_client_id_state` - (当前未使用) 指向存储云端客户端ID的 `Arc`。
-    /// * `last_pong_received_at_clone` - 指向最后收到Pong时间的 `Arc<RwLock<Option<DateTime>>>`，用于更新Pong时间。
-    async fn handle_on_message(
-        app_handle: &AppHandle,
-        ws_msg: WsMessage,
-        _cloud_assigned_client_id_state: &Arc<RwLock<Option<String>>>, // 参数保留，但目前未使用
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-    ) {
-        info!("[SatOnSiteMobile] (静态回调) 从云端收到消息: 类型='{}', 内容摘要='{}'", ws_msg.message_type, ws_msg.payload.chars().take(100).collect::<String>()); // 限制Payload长度以避免日志过长
-        
-        // 根据消息类型进行处理
-        if ws_msg.message_type == common_models::ws_payloads::ECHO_MESSAGE_TYPE {
-             match serde_json::from_str::<common_models::ws_payloads::EchoPayload>(&ws_msg.payload) {
-                Ok(echo_payload) => {
-                    info!("[SatOnSiteMobile] (静态回调) 成功解析 EchoPayload: {:?}", echo_payload);
-                    let response_event_payload = EchoResponseEventPayload { content: echo_payload.content };
-                    // 将 Echo 回复事件发送到前端
-                    if let Err(e) = app_handle.emit_to("main", ECHO_RESPONSE_EVENT, &response_event_payload) {
-                         error!("[SatOnSiteMobile] (静态回调) 发送 Echo响应 ({}) 事件到前端失败: {}", ECHO_RESPONSE_EVENT, e);
-                    }
-                }
-                Err(e) => {
-                    error!("[SatOnSiteMobile] (静态回调) 解析 EchoPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
-                }
-            }
-        } else if ws_msg.message_type == PONG_MESSAGE_TYPE {
-            info!("[SatOnSiteMobile] (静态回调) 收到 Pong 消息。");
-            // 更新最后收到 Pong 的时间
-            *last_pong_received_at_clone.write().await = Some(Utc::now());
-        }
-        // TODO: 在 P4.1.1 及后续步骤中，此处将添加对 "RegisterResponse", "PartnerStatusUpdate", "TaskStateUpdate" 等消息的处理逻辑。
-    }
-
-    /// WebSocket 连接关闭时的静态回调处理函数。
-    ///
-    /// 此函数在 `connect_client` 内部检测到连接关闭（无论是主动断开还是意外断开）时被调用。
-    /// 它会更新连接状态，清理资源（如发送通道），停止心跳任务，并发送连接断开事件到前端。
-    ///
-    /// # 参数
-    /// * `app_handle` - Tauri 应用句柄。
-    /// * `reason` - 可选的连接关闭原因。
-    /// * `is_connected_status` - 指向服务内部连接状态的 `Arc<RwLock<bool>>`。
-    /// * `cloud_assigned_client_id_state` - 指向服务内部存储云端客户端ID的 `Arc<RwLock<Option<String>>>`。
-    /// * `ws_send_channel_clone_for_cleanup` - 指向服务内部发送通道的 `Arc<TokioMutex<Option<SplitSink>>>`，用于清理。
-    /// * `heartbeat_task_handle_clone` - 指向心跳任务句柄的 `Arc<TokioMutex<Option<JoinHandle>>>`。
-    /// * `last_pong_received_at_clone` - 指向最后收到Pong时间的 `Arc<RwLock<Option<DateTime>>>`。
-    async fn handle_on_close(
-        app_handle: &AppHandle,
-        reason: Option<String>,
-        is_connected_status: &Arc<RwLock<bool>>,
-        cloud_assigned_client_id_state: &Arc<RwLock<Option<String>>>,
-        ws_send_channel_clone_for_cleanup: &Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-    ) {
-        let reason_msg = reason.unwrap_or_else(|| "连接已关闭，无特定原因".to_string());
-        info!("[SatOnSiteMobile] (静态回调) WebSocket 连接已关闭。原因: {}", reason_msg);
-        
-        // 更新状态并清理资源
-        *is_connected_status.write().await = false;
-        *cloud_assigned_client_id_state.write().await = None;
-        *ws_send_channel_clone_for_cleanup.lock().await = None; // 清理发送通道
-
-        // 停止心跳任务
-        Self::stop_heartbeat_task_static(heartbeat_task_handle_clone, last_pong_received_at_clone).await;
-
-        // 构建并发送连接断开事件到前端
-        let event_payload = WsConnectionStatusEvent {
-            connected: false,
-            error_message: Some(reason_msg), // 使用从回调获取或默认的原因
-            client_id: None,
-        };
-        if let Err(e) = app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-            error!("[SatOnSiteMobile] (静态回调) 发送"已断开连接"事件到前端失败: {}", e);
-        }
-    }
-
-    /// WebSocket 连接发生错误时的静态回调处理函数。
-    ///
-    /// 此函数在 `connect_client` 内部捕获到连接相关的错误时被调用。
-    /// 它会记录错误，更新连接状态，清理资源，停止心跳任务，并发送错误事件到前端。
-    ///
-    /// # 参数
-    /// (参数与 `handle_on_close` 类似，但 `error_message_str` 是具体的错误信息)
-    /// * `app_handle` - Tauri 应用句柄。
-    /// * `error_message_str` - 描述错误的字符串。
-    /// * `is_connected_status` - 指向服务内部连接状态的 `Arc<RwLock<bool>>`。
-    /// * `cloud_assigned_client_id_state` - 指向服务内部存储云端客户端ID的 `Arc<RwLock<Option<String>>>`。
-    /// * `ws_send_channel_clone_for_cleanup` - 指向服务内部发送通道的 `Arc<TokioMutex<Option<SplitSink>>>`，用于清理。
-    /// * `heartbeat_task_handle_clone` - 指向心跳任务句柄的 `Arc<TokioMutex<Option<JoinHandle>>>`。
-    /// * `last_pong_received_at_clone` - 指向最后收到Pong时间的 `Arc<RwLock<Option<DateTime>>>`。
-    async fn handle_on_error(
-        app_handle: &AppHandle,
-        error_message_str: String,
-        is_connected_status: &Arc<RwLock<bool>>,
-        cloud_assigned_client_id_state: &Arc<RwLock<Option<String>>>,
-        ws_send_channel_clone_for_cleanup: &Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-    ) {
-        error!("[SatOnSiteMobile] (静态回调) WebSocket 连接发生错误: {}", error_message_str);
-        
-        // 更新状态并清理资源
-        *is_connected_status.write().await = false;
-        *cloud_assigned_client_id_state.write().await = None;
-        *ws_send_channel_clone_for_cleanup.lock().await = None; // 清理发送通道
-
-        // 停止心跳任务
-        Self::stop_heartbeat_task_static(heartbeat_task_handle_clone, last_pong_received_at_clone).await;
-
-        // 构建并发送错误事件到前端
-        let event_payload = WsConnectionStatusEvent {
-            connected: false,
-            error_message: Some(error_message_str), // 使用从回调获取的错误信息
-            client_id: None,
-        };
-        if let Err(e) = app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-            error!("[SatOnSiteMobile] (静态回调) 发送"连接错误"事件到前端失败: {}", e);
-        }
-    }
-    
-    /// 启动心跳任务的静态辅助函数。
-    ///
-    /// 此函数会 `tokio::spawn` 一个新的异步任务，该任务定期发送 Ping 消息，
-    /// 并检查是否在超时期限内收到了 Pong 回复。如果超时未收到 Pong，
-    /// 则认为连接可能已死，并会调用 `handle_on_error` 来处理断连。
-    ///
-    /// # 参数
-    /// * `app_handle` - Tauri 应用句柄，用于在超时断连时调用 `handle_on_error`。
-    /// * `ws_send_channel_clone` - 发送 WebSocket 消息的通道。
-    /// * `heartbeat_task_handle_clone` - 用于存储新创建的心跳任务的句柄。
-    /// * `last_pong_received_at_clone` - 存储最后收到 Pong 消息的时间戳。
-    /// * `is_connected_status_clone` - 当前连接状态。
-    /// * `cloud_assigned_client_id_clone` - 云端分配的客户端 ID。
-    async fn start_heartbeat_task_static(
-        app_handle: AppHandle,
-        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
-        heartbeat_task_handle_clone: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
-        is_connected_status_clone: Arc<RwLock<bool>>,
-        cloud_assigned_client_id_clone: Arc<RwLock<Option<String>>>,
-    ) {
-        info!("[SatOnSiteMobile] (心跳任务) 正在尝试启动心跳任务...");
-        
-        // 获取心跳任务句柄的锁，准备存储新的任务句柄
-        let mut task_handle_guard = heartbeat_task_handle_clone.lock().await;
-        // 如果已存在一个心跳任务，先中止它
-        if let Some(existing_handle) = task_handle_guard.take() {
-            info!("[SatOnSiteMobile] (心跳任务) 检测到已存在的心跳任务，正在中止旧任务...");
-            existing_handle.abort(); // 中止旧任务
-            info!("[SatOnSiteMobile] (心跳任务) 旧的心跳任务已中止。");
-        }
-
-        info!("[SatOnSiteMobile] (心跳任务) 准备启动新的心跳循环，Ping 发送间隔: {} 秒, Pong 等待超时: {} 秒.", HEARTBEAT_INTERVAL_SECONDS, PONG_TIMEOUT_SECONDS);
-        
-        // 克隆需要在新异步任务中使用的 Arc 引用
-        let app_handle_for_spawn = app_handle.clone();
-        let ws_send_channel_for_spawn = ws_send_channel_clone.clone();
-        // 注意：heartbeat_task_handle_for_spawn 不需要在这里克隆用于内部，因为它自身就是被管理的句柄容器
-        let last_pong_for_spawn = last_pong_received_at_clone.clone();
-        let is_connected_for_spawn = is_connected_status_clone.clone();
-        let cloud_id_for_spawn = cloud_assigned_client_id_clone.clone();
-        let ws_send_channel_for_error_cleanup = ws_send_channel_clone.clone(); // 用于错误处理时的清理
-        let heartbeat_task_handle_for_error_cleanup = heartbeat_task_handle_clone.clone(); // 用于错误处理时的清理
-        let last_pong_for_error_cleanup = last_pong_received_at_clone.clone(); // 用于错误处理时的清理
-
-
-        let new_task = tokio::spawn(async move {
-            info!("[SatOnSiteMobile] (心跳循环) 心跳任务已启动，进入循环。");
-            loop {
-                // 1. 等待心跳间隔
-                info!("[SatOnSiteMobile] (心跳循环) 等待 {} 秒后发送 Ping...", HEARTBEAT_INTERVAL_SECONDS);
-                tokio::time::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
-                
-                // 2. 检查连接状态，如果未连接则退出心跳循环
-                if !*is_connected_for_spawn.read().await {
-                    info!("[SatOnSiteMobile] (心跳循环) 检测到连接已断开，准备退出心跳循环。");
-                    break;
-                }
-
-                // 3. 检查 Pong 超时
-                let current_time = Utc::now();
-                let last_pong_time_opt = *last_pong_for_spawn.read().await;
-                if let Some(last_pong_time) = last_pong_time_opt {
-                    if current_time.signed_duration_since(last_pong_time).num_seconds() as u64 > PONG_TIMEOUT_SECONDS {
-                        let error_msg = format!(
-                            "Pong超时！超过 {} 秒未收到 Pong 消息。上次收到 Pong 时间: {:?}, 当前时间: {:?}",
-                            PONG_TIMEOUT_SECONDS, last_pong_time, current_time
-                        );
-                        error!("[SatOnSiteMobile] (心跳循环) {}", error_msg);
-                        // 调用 handle_on_error 处理断连
-                        Self::handle_on_error(
-                            &app_handle_for_spawn,
-                            error_msg,
-                            &is_connected_for_spawn,
-                            &cloud_id_for_spawn,
-                            &ws_send_channel_for_error_cleanup, // 使用为错误清理准备的克隆
-                            &heartbeat_task_handle_for_error_cleanup, // 使用为错误清理准备的克隆
-                            &last_pong_for_error_cleanup, // 使用为错误清理准备的克隆
-                        ).await;
-                        info!("[SatOnSiteMobile] (心跳循环) Pong超时处理完成，退出心跳循环。");
-                        break; // 超时则退出心跳循环
-                    }
-                } else {
-                    // 这是第一次发送 Ping (或者 last_pong_received_at 被重置了)
-                    // 此时不判断超时，因为还没有基准的 Pong 时间
-                    info!("[SatOnSiteMobile] (心跳循环) last_pong_received_at 为 None，本次不检查 Pong 超时 (可能是首次 Ping)。");
-                }
-
-                // 4. 发送 Ping 消息
-                info!("[SatOnSiteMobile] (心跳循环) 准备发送 Ping 消息...");
-                let ping_payload = PingPayload {}; // PingPayload 是空结构体
-                match serde_json::to_string(&ping_payload) {
-                    Ok(payload_str) => {
-                        let ws_message = WsMessage::new(
-                            PING_MESSAGE_TYPE.to_string(),
-                            payload_str,
-                            None, // client_id，通常由服务器在接收时确定或客户端不需要指定
-                            None, // group_id
-                            None, // target_client_id
-                        );
-
-                        let mut sender_guard = ws_send_channel_for_spawn.lock().await;
-                        if let Some(sender) = sender_guard.as_mut() {
-                            match sender.send(TungsteniteMessage::Text(ws_message.to_json_string())).await {
-                                Ok(_) => {
-                                    info!("[SatOnSiteMobile] (心跳循环) Ping 消息已发送。");
-                                }
-                                Err(e) => {
-                                    error!("[SatOnSiteMobile] (心跳循环) 发送 Ping 消息失败: {}。可能连接已断开。", e);
-                                    // 可以在这里考虑是否立即调用 handle_on_error 或等待下一个循环的 Pong 超时检测
-                                    // 为避免立即断开，暂时只记录错误，依赖 Pong 超时机制
-                                }
-                            }
-                        } else {
-                            error!("[SatOnSiteMobile] (心跳循环) 尝试发送 Ping 时发现发送通道不存在，可能连接已断开。");
-                            info!("[SatOnSiteMobile] (心跳循环) 退出心跳循环。");
-                            break; // 发送通道不存在，退出循环
-                        }
-                    }
-                    Err(e) => {
-                        error!("[SatOnSiteMobile] (心跳循环) 序列化 PingPayload 失败: {}。无法发送 Ping。", e);
-                        // 这是一个内部错误，但通常不应导致连接断开，只记录
-                    }
-                }
-                info!("[SatOnSiteMobile] (心跳循环) Ping 消息发送流程结束。");
-            } // loop 结束
-            info!("[SatOnSiteMobile] (心跳循环) 心跳任务的内部循环已退出。");
-        });
-        // 将新创建的任务句柄存储起来
-        *task_handle_guard = Some(new_task);
-        info!("[SatOnSiteMobile] (心跳任务) 新的心跳任务已成功启动并存储句柄。");
-    }
-
-    /// 停止心跳任务的静态辅助函数。
-    ///
-    /// # 参数
-    /// * `heartbeat_task_handle_clone` - 指向心跳任务句柄的 `Arc<TokioMutex<Option<JoinHandle>>>`。
-    /// * `last_pong_received_at_clone` - 指向最后收到Pong时间的 `Arc<RwLock<Option<DateTime>>>`，用于重置。
-    async fn stop_heartbeat_task_static(
-        heartbeat_task_handle_clone: &Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
-        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
-    ) {
-        info!("[SatOnSiteMobile] (心跳任务) 正在尝试停止心跳任务...");
-        let mut task_handle_guard = heartbeat_task_handle_clone.lock().await;
-        if let Some(handle) = task_handle_guard.take() { // .take() 会移除 Option 中的值并返回它
-            handle.abort(); // 中止任务
-            info!("[SatOnSiteMobile] (心跳任务) 已中止。");
-        } else {
-            info!("[SatOnSiteMobile] (心跳任务) 无正在运行的心跳任务可停止。");
-        }
-        *last_pong_received_at_clone.write().await = None; // 重置最后收到 Pong 的时间
-        info!("[SatOnSiteMobile] (心跳任务) last_pong_received_at 已重置。");
-    }
-
-    /// 连接到指定的 WebSocket URL。
-    ///
-    /// 此方法会尝试建立到云端 WebSocket 服务的连接。
-    /// 连接成功或失败的状态会通过 Tauri 事件通知前端。
-    /// 它还会管理现有的连接任务，确保在发起新连接前中止旧的连接任务。
-    ///
-    /// # 参数
-    /// * `url_str` - 要连接的 WebSocket URL 字符串。
+    /// * `url_str`: 要连接的 WebSocket 服务器 URL 字符串。
     ///
     /// # 返回
-    /// * `Result<(), String>` - 如果连接尝试的初始化过程成功，则返回 `Ok(())`；
-    ///   如果 URL 解析失败或无法启动连接任务，则返回 `Err(String)` 包含错误信息。
-    ///   注意：此处的 `Ok(())` 仅表示连接过程已开始，不代表连接已成功建立。
-    ///   实际的连接成功/失败状态通过 `WsConnectionStatusEvent` 事件异步通知。
+    /// * `Result<(), String>`: 如果连接启动过程成功（即后台任务已安排），则返回 `Ok(())`。
+    ///   如果 URL 无效或在启动连接任务时发生即时错误，则返回 `Err(String)`。
+    ///   注意：实际的连接成功或失败将通过 `WS_CONNECTION_STATUS_EVENT` 事件异步通知。
     pub async fn connect(&self, url_str: &str) -> Result<(), String> {
-        info!("[SatOnSiteMobile] WebSocketClientService: 尝试连接到 URL: {}", url_str);
+        info!("[SatOnSiteMobile] WebSocketClientService::connect 调用，目标 URL: {}", url_str);
 
-        // 1. 解析 URL
-        let url = match url::Url::parse(url_str) {
-            Ok(u) => u,
-            Err(e) => {
-                let err_msg = format!("无效的 WebSocket URL: {}. 错误: {}", url_str, e);
-                error!("[SatOnSiteMobile] {}", err_msg);
-                // 立即通过事件通知前端连接尝试失败 (因为URL无效，无法继续)
-                let event_payload = WsConnectionStatusEvent {
-                    connected: false,
-                    error_message: Some(err_msg.clone()),
-                    client_id: None,
-                };
-                if let Err(event_err) = self.app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-                    error!("[SatOnSiteMobile] 发送 URL无效 连接错误事件到前端失败: {}", event_err);
-                }
-                return Err(err_msg);
-            }
-        };
-
-        // 2. 如果已存在连接任务，则先中止它
-        info!("[SatOnSiteMobile] 检查是否存在已有的连接任务...");
-        let mut existing_task_handle_guard = self.connection_task_handle.lock().await;
-        if let Some(task_handle) = existing_task_handle_guard.take() {
-            info!("[SatOnSiteMobile] 检测到已存在的连接任务，正在中止旧任务...");
-            task_handle.abort();
-            info!("[SatOnSiteMobile] 旧的连接任务已中止。");
-            // 确保旧连接相关的状态被清理 (特别是 is_connected_status)
-            *self.is_connected_status.write().await = false;
-            *self.cloud_assigned_client_id.write().await = None;
-            // 也需要停止心跳任务，因为它是与特定连接关联的
-            Self::stop_heartbeat_task_static(&self.heartbeat_task_handle, &self.last_pong_received_at).await;
-            info!("[SatOnSiteMobile] 旧连接相关的状态已清理，心跳已停止。");
-        }
-
-        // 3. 准备回调中会用到的状态 Arc 引用 (克隆)
+        // 克隆需要在新任务中使用的 Arc 引用
         let app_handle_clone = self.app_handle.clone();
         let ws_send_channel_clone = self.ws_send_channel.clone();
         let cloud_assigned_client_id_clone = self.cloud_assigned_client_id.clone();
         let is_connected_status_clone = self.is_connected_status.clone();
-        let heartbeat_task_handle_clone_for_on_open = self.heartbeat_task_handle.clone();
-        let last_pong_received_at_clone_for_callbacks = self.last_pong_received_at.clone();
-        
-        // 为 on_close 和 on_error 回调准备清理用的克隆
-        let ws_send_channel_clone_for_cleanup = self.ws_send_channel.clone();
-        let heartbeat_task_handle_clone_for_cleanup = self.heartbeat_task_handle.clone();
+        let connection_task_handle_clone = self.connection_task_handle.clone();
+        let heartbeat_task_handle_clone = self.heartbeat_task_handle.clone();
+        let last_pong_received_at_clone = self.last_pong_received_at.clone();
+        let local_task_state_cache_clone = self.local_task_state_cache.clone();
+        let url_string = url_str.to_string();
 
-        // 4. 定义回调闭包
-        let on_open_callback = {
-            // 再次克隆需要在 on_open 异步块中使用的 Arc 引用
-            let app_handle_for_on_open = app_handle_clone.clone();
-            let is_connected_status_for_on_open = is_connected_status_clone.clone();
-            let cloud_id_for_on_open = cloud_assigned_client_id_clone.clone();
-            let ws_send_for_on_open = ws_send_channel_clone.clone(); // 这个 ws_send_channel_clone 实际上是给心跳任务用的
-            let heartbeat_for_on_open = heartbeat_task_handle_clone_for_on_open.clone();
-            let last_pong_for_on_open = last_pong_received_at_clone_for_callbacks.clone();
+        // 如果当前已有连接任务在运行，先尝试取消它
+        let mut conn_task_guard = connection_task_handle_clone.lock().await;
+        if let Some(handle) = conn_task_guard.take() {
+            info!("[SatOnSiteMobile] 检测到之前的连接任务正在运行，正在尝试取消...");
+            handle.abort(); // 请求取消任务
+            match handle.await { // 等待任务结束（即使是被取消的）
+                Ok(_) => info!("[SatOnSiteMobile] 之前的连接任务已成功取消或完成。"),
+                Err(e) if e.is_cancelled() => info!("[SatOnSiteMobile] 之前的连接任务已被取消。"),
+                Err(e) => warn!("[SatOnSiteMobile] 等待之前的连接任务结束时发生错误: {:?}", e),
+            }
+            info!("[SatOnSiteMobile] 已清理之前的连接任务句柄。");
+            // 清理相关状态
+            *is_connected_status_clone.write().await = false;
+            *ws_send_channel_clone.lock().await = None;
+            *cloud_assigned_client_id_clone.write().await = None;
+            // 心跳任务句柄也应停止
+            let mut hb_task_guard = heartbeat_task_handle_clone.lock().await;
+            if let Some(hb_handle) = hb_task_guard.take() {
+                 hb_handle.abort();
+                 info!("[SatOnSiteMobile] 已请求取消相关的心跳任务。");
+                 // 不必 await 心跳任务的结束，因为它应该很快响应 abort
+            }
+            *last_pong_received_at_clone.write().await = None;
+        }
+        drop(conn_task_guard); // 释放锁
 
-            move |client_connection: ClientConnection| {
-                let app_handle_async = app_handle_for_on_open.clone();
-                let is_connected_async = is_connected_status_for_on_open.clone();
-                let cloud_id_async = cloud_id_for_on_open.clone();
-                let ws_send_async = ws_send_for_on_open.clone(); 
-                let heartbeat_async = heartbeat_for_on_open.clone();
-                let last_pong_async = last_pong_for_on_open.clone();
+        // 启动新的异步任务来处理连接生命周期
+        let connection_task = tokio::spawn(async move {
+            let mut connection_attempt_successful = false;
+            let mut final_error_message: Option<String> = None;
+            let mut heartbeat_join_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-                async move {
-                    info!("[SatOnSiteMobile] (connect) on_open_callback 触发。");
-                    // 存储发送通道的 Sink 部分
-                    *ws_send_async.lock().await = Some(client_connection.ws_tx);
-                    // 调用静态回调处理函数
-                    Self::handle_on_open(
-                        &app_handle_async,
-                        client_connection.client_id, // 从 ClientConnection 获取 client_id
-                        &is_connected_async,
-                        &cloud_id_async,
-                        ws_send_async, // 这个参数实际是给心跳任务内部发送ping用的
-                        heartbeat_async,
-                        last_pong_async,
-                    ).await;
+            // --- 连接阶段 ---
+            info!("[SatOnSiteMobile] (连接任务) 开始尝试连接到: {}", url_string);
+            match transport::connect_client(url_string.clone()).await {
+                Ok(mut client_connection) => {
+                    info!("[SatOnSiteMobile] (连接任务) 连接成功建立。");
+                    connection_attempt_successful = true;
+
+                    // --- 连接成功后的处理 (原 handle_on_open 逻辑) ---
+                    *is_connected_status_clone.write().await = true;
+                    // cloud_assigned_client_id 在注册响应后更新
+                    *last_pong_received_at_clone.write().await = Some(Utc::now());
+
+                    // 发送连接成功事件
+                    let event_payload = WsConnectionStatusEvent { 
+                        connected: true,
+                        error_message: Some("成功连接到云端WebSocket服务".to_string()),
+                        client_id: None, 
+                    };
+                    if let Err(e) = app_handle_clone.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                        error!(
+                            "[SatOnSiteMobile] (连接任务) 发送 \"已连接\" 事件 ({}) 失败: {}", 
+                            WS_CONNECTION_STATUS_EVENT, e
+                        );
+                    }
+
+                    // 存储发送通道
+                    *ws_send_channel_clone.lock().await = Some(client_connection.ws_sender);
+
+                    // 启动心跳任务
+                    let hb_app_handle = app_handle_clone.clone();
+                    let hb_ws_send = ws_send_channel_clone.clone();
+                    let hb_last_pong = last_pong_received_at_clone.clone();
+                    let hb_is_connected = is_connected_status_clone.clone();
+                    let hb_cloud_id = cloud_assigned_client_id_clone.clone();
+                    let hb_task = tokio::spawn(async move {
+                        Self::run_heartbeat_loop(
+                            hb_app_handle,
+                            hb_ws_send,
+                            hb_last_pong,
+                            hb_is_connected,
+                            hb_cloud_id,
+                        ).await;
+                    });
+                    heartbeat_join_handle = Some(hb_task);
+
+                    // --- 消息接收循环 ---
+                    loop {
+                        tokio::select! {
+                            // 接收消息
+                            maybe_msg_result = transport::receive_message(&mut client_connection.ws_receiver) => {
+                                match maybe_msg_result {
+                                    Some(Ok(ws_msg)) => {
+                                        // --- 处理收到的消息 (原 handle_on_message 逻辑) ---
+                                         Self::process_received_message(
+                                             &app_handle_clone,
+                                             ws_msg,
+                                             &cloud_assigned_client_id_clone,
+                                             &last_pong_received_at_clone,
+                                             &local_task_state_cache_clone,
+                                         ).await;
+                                    }
+                                    Some(Err(e)) => {
+                                        // --- 处理接收或解析错误 (原 handle_on_error 部分逻辑) ---
+                                        error!("[SatOnSiteMobile] (连接任务) 消息接收或解析时发生错误: {}", e);
+                                        final_error_message = Some(format!("接收消息时出错: {}", e));
+                                        break; // 发生错误，退出接收循环
+                                    }
+                                    None => {
+                                        // --- 连接已关闭 (原 handle_on_close 逻辑) ---
+                                        info!("[SatOnSiteMobile] (连接任务) WebSocket 连接已由对端关闭。");
+                                        final_error_message = Some("连接已由对端关闭".to_string());
+                                        break; // 连接关闭，退出接收循环
+                                    }
+                                }
+                            }
+                            // 检查外部断开信号
+                             _ = async {
+                                 loop {
+                                     tokio::time::sleep(Duration::from_millis(500)).await;
+                                     if !*is_connected_status_clone.read().await {
+                                         break;
+                                     }
+                                 }
+                             } => {
+                                 info!("[SatOnSiteMobile] (连接任务) 检测到连接状态变为 false，主动退出任务。");
+                                 final_error_message = final_error_message.or_else(|| Some("连接被主动断开".to_string()));
+                                 break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // --- 处理连接错误 (原 handle_on_error 部分逻辑) ---
+                    error!("[SatOnSiteMobile] (连接任务) 连接到 {} 失败: {}", url_string, e);
+                    final_error_message = Some(format!("连接失败: {}", e));
                 }
             }
-        };
 
-        let on_message_callback = {
-            let app_handle_for_on_msg = app_handle_clone.clone();
-            let cloud_id_for_on_msg = cloud_assigned_client_id_clone.clone();
-            let last_pong_for_on_msg = last_pong_received_at_clone_for_callbacks.clone();
-            move |ws_msg: WsMessage| {
-                let app_handle_async = app_handle_for_on_msg.clone();
-                let cloud_id_async = cloud_id_for_on_msg.clone();
-                let last_pong_async = last_pong_for_on_msg.clone();
-                async move {
-                    info!("[SatOnSiteMobile] (connect) on_message_callback 触发。");
-                    Self::handle_on_message(&app_handle_async, ws_msg, &cloud_id_async, &last_pong_async).await;
+            // --- 清理阶段 (无论连接成功与否，或循环退出原因) ---
+            info!("[SatOnSiteMobile] (连接任务) 进入清理阶段...");
+
+            // 停止心跳任务 (如果已启动)
+            if let Some(hb_handle) = heartbeat_join_handle {
+                info!("[SatOnSiteMobile] (连接任务) 正在停止心跳任务...");
+                hb_handle.abort();
+                // 可以选择 await，但通常 abort 即可
+                 let mut hb_guard = heartbeat_task_handle_clone.lock().await;
+                 if hb_guard.is_some() { *hb_guard = None; } // 清理存储的句柄
+            }
+
+            // 更新最终连接状态
+            let was_connected = *is_connected_status_clone.read().await;
+            *is_connected_status_clone.write().await = false;
+            *cloud_assigned_client_id_clone.write().await = None;
+            *ws_send_channel_clone.lock().await = None;
+            *last_pong_received_at_clone.write().await = None;
+            // local_task_state_cache_clone 不需要在此处清除，保持最后的状态
+
+            // 发送最终的连接状态事件 (使用 WsConnectionStatusEvent)
+            if !connection_attempt_successful || was_connected {
+                let event_payload = WsConnectionStatusEvent { 
+                    connected: false,
+                    error_message: final_error_message.or_else(|| Some("连接已关闭".to_string())), 
+                    client_id: None, // 断开时通常不需要发送 client_id
+                };
+                if let Err(e) = app_handle_clone.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                    error!(
+                        "[SatOnSiteMobile] (连接任务-清理) 发送 \"连接关闭/失败\" 事件 ({}) 失败: {}",
+                        WS_CONNECTION_STATUS_EVENT, e
+                    );
                 }
             }
-        };
 
-        let on_close_callback = {
-            let app_handle_for_on_close = app_handle_clone.clone();
-            let is_connected_for_on_close = is_connected_status_clone.clone();
-            let cloud_id_for_on_close = cloud_assigned_client_id_clone.clone();
-            let ws_send_for_cleanup = ws_send_channel_clone_for_cleanup.clone();
-            let heartbeat_for_cleanup = heartbeat_task_handle_clone_for_cleanup.clone();
-            let last_pong_for_cleanup = last_pong_received_at_clone_for_callbacks.clone();
-            move |reason: Option<String>| {
-                let app_handle_async = app_handle_for_on_close.clone();
-                let is_connected_async = is_connected_for_on_close.clone();
-                let cloud_id_async = cloud_id_for_on_close.clone();
-                let ws_send_async_cleanup = ws_send_for_cleanup.clone();
-                let heartbeat_async_cleanup = heartbeat_for_cleanup.clone();
-                let last_pong_async_cleanup = last_pong_for_cleanup.clone();
-                async move {
-                    info!("[SatOnSiteMobile] (connect) on_close_callback 触发。");
-                    Self::handle_on_close(
-                        &app_handle_async, 
-                        reason, 
-                        &is_connected_async, 
-                        &cloud_id_async, 
-                        &ws_send_async_cleanup, 
-                        &heartbeat_async_cleanup,
-                        &last_pong_async_cleanup,
-                    ).await;
-                }
-            }
-        };
+            // 从主服务中移除任务句柄 (表示任务已结束)
+            let mut task_guard = connection_task_handle_clone.lock().await;
+            // Compare the task ID or handle if possible to ensure we remove the correct one,
+            // but JoinHandle doesn't easily expose a comparable ID. Assuming only one active task.
+             if task_guard.is_some() {
+                 *task_guard = None;
+                 info!("[SatOnSiteMobile] (连接任务) 已清理自身在主服务中的任务句柄。");
+             } else {
+                 info!("[SatOnSiteMobile] (连接任务) 自身任务句柄已不在主服务中，可能已被新连接任务覆盖。");
+             }
 
-        let on_error_callback = {
-            // app_handle_clone, is_connected_status_clone, cloud_assigned_client_id_clone 已在外部克隆
-            // ws_send_channel_clone_for_cleanup, heartbeat_task_handle_clone_for_cleanup 已在外部克隆
-            // last_pong_received_at_clone_for_callbacks 已在外部克隆
-            let app_handle_for_on_error = app_handle_clone.clone(); // Renamed for clarity within this scope
-            let is_connected_for_on_error = is_connected_status_clone.clone();
-            let cloud_id_for_on_error = cloud_assigned_client_id_clone.clone();
-            let ws_send_for_error_cleanup = ws_send_channel_clone_for_cleanup.clone(); 
-            let heartbeat_for_error_cleanup = heartbeat_task_handle_clone_for_cleanup.clone(); 
-            let last_pong_for_error_cleanup = last_pong_received_at_clone_for_callbacks.clone();
 
-            move |err_msg: String| {
-                let app_handle_async = app_handle_for_on_error.clone();
-                let is_connected_async = is_connected_for_on_error.clone();
-                let cloud_id_async = cloud_id_for_on_error.clone();
-                let ws_send_async_err_cleanup = ws_send_for_error_cleanup.clone();
-                let heartbeat_async_err_cleanup = heartbeat_for_error_cleanup.clone();
-                let last_pong_async_err_cleanup = last_pong_for_error_cleanup.clone();
-                async move {
-                    info!("[SatOnSiteMobile] (connect) on_error_callback 触发。");
-                    Self::handle_on_error(
-                        &app_handle_async, 
-                        err_msg, 
-                        &is_connected_async, 
-                        &cloud_id_async, 
-                        &ws_send_async_err_cleanup, 
-                        &heartbeat_async_err_cleanup,
-                        &last_pong_async_err_cleanup,
-                    ).await;
-                }
-            }
-        };
-        
-        // 5. 调用 rust_websocket_utils 的 connect_client 启动连接过程
-        info!("[SatOnSiteMobile] 准备调用 connect_client 启动 WebSocket 连接任务...");
-        let connection_join_handle = connect_client(
-            url,
-            self.app_handle.clone(), // 主 app_handle 用于 receive_message 内部的日志和潜在的直接事件
-            on_open_callback,
-            on_message_callback,
-            on_close_callback,
-            on_error_callback,
-            None // client_id_to_register - 客户端通常不预设ID，等待服务端分配或通过业务消息注册
-        );
+            info!("[SatOnSiteMobile] (连接任务) 已完成。");
+        });
 
-        // 6. 存储新的连接任务句柄
-        *existing_task_handle_guard = Some(connection_join_handle);
-        info!("[SatOnSiteMobile] 新的 WebSocket 连接任务已启动并存储句柄。");
+        // 存储新启动的连接任务的句柄
+        let mut task_guard = self.connection_task_handle.lock().await;
+        *task_guard = Some(connection_task);
+        info!("[SatOnSiteMobile] WebSocket 连接任务已成功启动并存储句柄。");
 
         Ok(())
     }
 
-    /// 主动断开当前的 WebSocket 连接。
+    /// 辅助函数：处理接收到的单个 WebSocket 消息。
+    async fn process_received_message(
+        app_handle: &AppHandle,
+        ws_msg: WsMessage,
+        cloud_assigned_client_id_state: &Arc<RwLock<Option<Uuid>>>,
+        last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
+        local_task_state_cache_clone: &Arc<RwLock<Option<TaskDebugState>>>,
+    ) {
+        info!(
+            "[SatOnSiteMobile] (处理消息) 类型='{}', 消息ID='{}', 时间戳='{}', Payload摘要='{}'", 
+            ws_msg.message_type, ws_msg.message_id, ws_msg.timestamp, ws_msg.payload.chars().take(100).collect::<String>()
+        ); 
+        
+        match ws_msg.message_type.as_str() {
+            common_models::ws_payloads::ECHO_MESSAGE_TYPE => {
+                 match serde_json::from_str::<common_models::ws_payloads::EchoPayload>(&ws_msg.payload) {
+                    Ok(echo_payload) => {
+                        info!("[SatOnSiteMobile] (处理消息) 成功解析 EchoPayload: {:?}", echo_payload);
+                        let response_event_payload = EchoResponseEventPayload { content: echo_payload.content };
+                        if let Err(e) = app_handle.emit_to("main", ECHO_RESPONSE_EVENT, &response_event_payload) {
+                             error!("[SatOnSiteMobile] (处理消息) 发送 Echo响应 ({}) 事件失败: {}", ECHO_RESPONSE_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[SatOnSiteMobile] (处理消息) 解析 EchoPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            PONG_MESSAGE_TYPE => {
+                info!("[SatOnSiteMobile] (处理消息) 收到 Pong 消息。");
+                *last_pong_received_at_clone.write().await = Some(Utc::now());
+            }
+            REGISTER_RESPONSE_MESSAGE_TYPE => {
+                match serde_json::from_str::<RegisterResponsePayload>(&ws_msg.payload) {
+                    Ok(payload) => {
+                        info!("[SatOnSiteMobile] (处理消息) 收到并解析 RegisterResponsePayload: {:?}", payload);
+                        let event_payload = WsRegistrationStatusEventPayload {
+                            success: payload.success,
+                            message: payload.message.clone(),
+                            group_id: payload.effective_group_id.clone(),
+                            task_id: None, 
+                        };
+
+                        if payload.success {
+                            let assigned_id = payload.assigned_client_id;
+                            *cloud_assigned_client_id_state.write().await = Some(assigned_id);
+                            info!("[SatOnSiteMobile] (处理消息) 客户端注册成功，云端分配的客户端ID: {}", assigned_id);
+                        } else {
+                            warn!("[SatOnSiteMobile] (处理消息) 客户端注册失败。原因: {:?}", payload.message);
+                            *cloud_assigned_client_id_state.write().await = None;
+                        }
+                        
+                        if let Err(e) = app_handle.emit_to("main", WS_REGISTRATION_STATUS_EVENT, &event_payload) {
+                            error!("[SatOnSiteMobile] (处理消息) 发送 WsRegistrationStatusEventPayload ({}) 事件失败: {}", WS_REGISTRATION_STATUS_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[SatOnSiteMobile] (处理消息) 解析 RegisterResponsePayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            PARTNER_STATUS_UPDATE_MESSAGE_TYPE => {
+                match serde_json::from_str::<PartnerStatusPayload>(&ws_msg.payload) {
+                    Ok(payload) => {
+                        info!("[SatOnSiteMobile] (处理消息) 收到并解析 PartnerStatusPayload: {:?}", payload);
+                        let event_payload = WsPartnerStatusEventPayload {
+                            partner_role: payload.partner_role.to_string(), 
+                            is_online: payload.is_online,
+                        };
+                        if let Err(e) = app_handle.emit_to("main", WS_PARTNER_STATUS_EVENT, &event_payload) {
+                            error!("[SatOnSiteMobile] (处理消息) 发送 WsPartnerStatusEventPayload ({}) 事件失败: {}", WS_PARTNER_STATUS_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[SatOnSiteMobile] (处理消息) 解析 PartnerStatusPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            TASK_STATE_UPDATE_MESSAGE_TYPE => {
+                match serde_json::from_str::<TaskDebugState>(&ws_msg.payload) {
+                    Ok(new_state) => {
+                        info!("[SatOnSiteMobile] (处理消息) 收到并解析 TaskDebugState (任务ID: {}), 最后更新者: {:?}, 更新时间戳: {}", 
+                            new_state.task_id, new_state.last_updated_by_role, new_state.last_update_timestamp
+                        );
+                        *local_task_state_cache_clone.write().await = Some(new_state.clone());
+                        
+                        let new_state_value = match serde_json::to_value(new_state) {
+                            Ok(val) => val,
+                            Err(e) => {
+                                error!("[SatOnSiteMobile] (处理消息) 序列化 TaskDebugState 为 serde_json::Value 失败: {}", e);
+                                return; 
+                            }
+                        };
+                        let event_payload = LocalTaskStateUpdatedEventPayload { new_state: new_state_value };
+                        if let Err(e) = app_handle.emit_to("main", LOCAL_TASK_STATE_UPDATED_EVENT, &event_payload) {
+                            error!("[SatOnSiteMobile] (处理消息) 发送 LocalTaskStateUpdatedEventPayload ({}) 事件失败: {}", LOCAL_TASK_STATE_UPDATED_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[SatOnSiteMobile] (处理消息) 解析 TaskDebugState 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            // 注释掉处理 ERROR_RESPONSE_MESSAGE_TYPE 的分支，因为相关事件未定义
+            /*
+            ERROR_RESPONSE_MESSAGE_TYPE => { 
+                match serde_json::from_str::<ErrorResponsePayload>(&ws_msg.payload) {
+                    Ok(payload) => {
+                        warn!("[SatOnSiteMobile] (处理消息) 收到来自云端的错误响应: 原消息类型='{:?}', 错误='{}'", payload.original_message_type, payload.error);
+                        let event_payload = WsServerErrorEventPayload {
+                            original_message_type: payload.original_message_type,
+                            error: payload.error,
+                        };
+                        if let Err(e) = app_handle.emit_to("main", WS_SERVER_ERROR_EVENT, &event_payload) {
+                            error!("[SatOnSiteMobile] (处理消息) 发送 WsServerErrorEventPayload ({}) 事件失败: {}", WS_SERVER_ERROR_EVENT, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[SatOnSiteMobile] (处理消息) 解析 ErrorResponsePayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                    }
+                }
+            }
+            */
+            unknown_type => {
+                warn!("[SatOnSiteMobile] (处理消息) 收到未处理的 WebSocket 消息类型: '{}'", unknown_type);
+            }
+        }
+    }
+
+    /// 辅助函数：运行心跳循环。
+    async fn run_heartbeat_loop(
+        app_handle: AppHandle,
+        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
+        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
+        is_connected_status_clone: Arc<RwLock<bool>>,
+        _cloud_assigned_client_id_clone: Arc<RwLock<Option<Uuid>>>, // Keep for potential future use
+    ) {
+        info!("[SatOnSiteMobile] (心跳任务) 启动。");
+        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
+        loop {
+            interval.tick().await; // 等待下一个心跳间隔
+
+            // 1. 检查连接状态
+            if !*is_connected_status_clone.read().await {
+                info!("[SatOnSiteMobile] (心跳任务) 检测到连接已断开，退出心跳循环。");
+                break;
+            }
+
+            // 2. 检查 Pong 超时
+            let now = Utc::now();
+            let last_pong_time = *last_pong_received_at_clone.read().await;
+            if let Some(last_pong) = last_pong_time {
+                // Use chrono::Duration for comparison
+                if now.signed_duration_since(last_pong) > chrono::Duration::seconds((HEARTBEAT_INTERVAL_SECONDS + PONG_TIMEOUT_SECONDS) as i64) {
+                    warn!(
+                        "[SatOnSiteMobile] (心跳任务) Pong 响应超时 (最后一次收到 Pong 是在: {:?}, 当前时间: {:?})。将触发断开连接处理。",
+                        last_pong, now
+                    );
+                    // 发送连接错误事件到前端
+                    let event_payload = WsConnectionStatusEvent { 
+                        connected: false,
+                        error_message: Some("心跳响应超时，连接可能已断开".to_string()),
+                        client_id: None, // 断开时清除 ID
+                    };
+                    if let Err(e) = app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                        error!("[SatOnSiteMobile] (心跳任务) 发送 Pong 超时断开事件失败: {}", e);
+                    }
+                    // 更新连接状态为 false，这将导致主连接任务退出
+                    *is_connected_status_clone.write().await = false;
+                    info!("[SatOnSiteMobile] (心跳任务) 因 Pong 超时，已将连接状态设为 false，退出心跳循环。");
+                    break;
+                }
+            } else {
+                // 如果从未收到过 Pong (last_pong_received_at 仍为 None)，但连接已建立一段时间，也可能表示有问题
+                // 但首次 Ping 可能还未收到响应，所以这里暂时不处理 None 的情况，依赖后续的超时
+                debug!("[SatOnSiteMobile] (心跳任务) 尚未收到任何 Pong 响应。");
+            }
+            
+            // 3. 发送 Ping 消息
+            let ping_payload = PingPayload {}; 
+            match WsMessage::new(PING_MESSAGE_TYPE.to_string(), &ping_payload) {
+                Ok(ws_message) => {
+                    info!(
+                        "[SatOnSiteMobile] (心跳任务) 准备发送 Ping 消息 (ID: {}, Type: {}) 到云端...",
+                        ws_message.message_id, ws_message.message_type
+                    );
+                    if let Some(sender) = ws_send_channel_clone.lock().await.as_mut() {
+                         match serde_json::to_string(&ws_message) { // 使用 serde_json::to_string
+                             Ok(msg_json) => {
+                                match sender.send(TungsteniteMessage::Text(msg_json)).await { 
+                                    Ok(_) => {
+                                        info!("[SatOnSiteMobile] (心跳任务) Ping 消息已成功发送。");
+                                        // 发送成功后，可以稍微提前更新 last_pong_received_at 的"预期"时间，
+                                        // 或者依赖严格的超时检查。
+                                        // 为简单起见，此处不更新，等待 Pong 回复来实际更新。
+                                    }
+                                    Err(e) => {
+                                        error!("[SatOnSiteMobile] (心跳任务) 发送 Ping 消息失败: {}", e);
+                                        // 失败可能表示连接问题，但同样依赖 Pong 超时处理
+                                        // 如果发送失败，很可能连接已断开，可以考虑立即设置 is_connected = false
+                                        *is_connected_status_clone.write().await = false;
+                                        info!("[SatOnSiteMobile] (心跳任务) 因 Ping 发送失败，已将连接状态设为 false，退出心跳循环。");
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("[SatOnSiteMobile] (心跳任务) 序列化 Ping WsMessage 失败: {}", e);
+                            }
+                        }
+                    } else {
+                        warn!("[SatOnSiteMobile] (心跳任务) WebSocket 发送通道不可用，无法发送 Ping。退出心跳循环。");
+                        break; 
+                    }
+                }
+                Err(e) => {
+                    error!("[SatOnSiteMobile] (心跳任务) 创建 Ping WsMessage 失败: {}", e);
+                }
+            }
+        }
+        info!("[SatOnSiteMobile] (心跳任务) 已结束。");
+    }
+
+    /// 请求断开当前的 WebSocket 连接。
     ///
-    /// 此方法会中止正在运行的连接任务和心跳任务，并清理相关状态。
-    /// 连接断开的状态会通过 `WsConnectionStatusEvent` 事件通知前端。
+    /// 这会设置内部状态以指示断开，并通知正在运行的连接任务退出。
     ///
     /// # 返回
-    /// * `Result<(), String>` - 如果操作成功（或没有活动连接可断开），返回 `Ok(())`；
-    ///   如果内部操作出现问题（理论上不太可能，因为主要是中止任务），则可能返回 `Err`。
+    /// * `Result<(), String>`: 如果请求处理成功，则返回 `Ok(())`。
     pub async fn disconnect(&self) -> Result<(), String> {
-        info!("[SatOnSiteMobile] WebSocketClientService: 尝试主动断开连接...");
+        info!("[SatOnSiteMobile] WebSocketClientService::disconnect 被调用。");
+        let mut is_connected_guard = self.is_connected_status.write().await;
+        if *is_connected_guard {
+            info!("[SatOnSiteMobile] 当前处于连接状态，准备断开...");
+            *is_connected_guard = false; // 设置状态为 false，连接任务会检测到并退出
+            drop(is_connected_guard); // Release the lock before potentially blocking operations
 
-        // 1. 中止连接任务
-        let mut task_handle_guard = self.connection_task_handle.lock().await;
-        if let Some(task_handle) = task_handle_guard.take() { // .take() 会移除 Option 中的值
-            info!("[SatOnSiteMobile] 正在中止连接任务...");
-            task_handle.abort();
-            info!("[SatOnSiteMobile] 连接任务已中止。");
+            // （可选）尝试发送一个 Close 帧给服务器，进行优雅关闭
+            let mut sender_guard = self.ws_send_channel.lock().await;
+            if let Some(sender) = sender_guard.as_mut() {
+                info!("[SatOnSiteMobile] 尝试向服务器发送 Close 帧...");
+                // Use feed and flush for Close frame based on futures::SinkExt
+                // Or if using tungstenite directly, check its API for closing.
+                // Assuming sender implements SinkExt:
+                // match sender.send(TungsteniteMessage::Close(None)).await {
+                // Or using close():
+                match sender.close().await {
+                   Ok(_) => info!("[SatOnSiteMobile] Close 帧已发送或请求已发出。"),
+                   Err(e) => warn!("[SatOnSiteMobile] 发送 Close 帧失败（可能连接已断开）: {}", e),
+                }
+            }
+            drop(sender_guard);
+
+            // (Optional) Abort the connection task handle immediately if needed,
+            // but relying on the is_connected flag is generally preferred for graceful shutdown.
+             let mut task_guard = self.connection_task_handle.lock().await;
+             if let Some(handle) = task_guard.as_ref() {
+                 info!("[SatOnSiteMobile] (disconnect) 请求中止连接任务...");
+                 handle.abort();
+             }
+             // Keep the handle in the state for now, the task itself will remove it on exit.
+             // *task_guard = None; // Don't remove handle here
+             drop(task_guard);
+
+
+            // 发送断开事件（连接任务的清理阶段也会发，这里发送提供即时反馈）
+            let event_payload = WsConnectionStatusEvent { 
+                connected: false,
+                error_message: Some("客户端主动断开连接".to_string()),
+                client_id: None,
+            };
+            if let Err(e) = self.app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                error!(
+                    "[SatOnSiteMobile] 发送 \"主动断开\" 事件到前端失败: {}",
+                    e
+                );
+            } else {
+                info!("[SatOnSiteMobile] 已向前端发送主动断开事件。");
+            }
+             Ok(())
         } else {
-            info!("[SatOnSiteMobile] 没有活动的连接任务可中止。");
+             drop(is_connected_guard);
+             info!("[SatOnSiteMobile] 当前未连接，无需执行断开操作。");
+            Ok(())
         }
-
-        // 2. 中止心跳任务 (通过静态辅助函数)
-        Self::stop_heartbeat_task_static(&self.heartbeat_task_handle, &self.last_pong_received_at).await;
-        // stop_heartbeat_task_static 内部已有日志
-
-        // 3. 清理状态 (部分状态可能已在回调中清理，这里确保彻底)
-        *self.is_connected_status.write().await = false;
-        *self.cloud_assigned_client_id.write().await = None;
-        *self.ws_send_channel.lock().await = None;
-        info!("[SatOnSiteMobile] 连接相关状态已清理。");
-
-        // 4. 发送断开连接事件到前端
-        // 注意：handle_on_close 或 handle_on_error 回调通常也会发送此事件。
-        // 但如果是因为主动 disconnect，那些回调可能不会被 `connect_client` 的逻辑触发。
-        // 因此，在这里额外发送一次，确保前端状态一致。可以考虑增加判断避免重复发送。
-        let event_payload = WsConnectionStatusEvent {
-            connected: false,
-            error_message: Some("用户主动断开连接".to_string()),
-            client_id: None,
-        };
-        if let Err(e) = self.app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-            error!("[SatOnSiteMobile] 发送"主动断开"事件到前端失败: {}", e);
-        } else {
-            info!("[SatOnSiteMobile] 已向前端发送"主动断开"事件。");
-        }
-        
-        Ok(())
     }
 
     /// 检查当前 WebSocket 是否已连接。
-    ///
-    /// # 返回
-    /// * `bool` - 如果已连接则返回 `true`，否则返回 `false`。
     pub async fn is_connected(&self) -> bool {
         *self.is_connected_status.read().await
     }
 
-    /// 通过 WebSocket 连接发送消息到云端。
+    /// 向 WebSocket 服务器发送一个 `WsMessage`。
     ///
     /// # 参数
     /// * `message` - 要发送的 `WsMessage` 实例。
     ///
     /// # 返回
-    /// * `Result<(), String>` - 如果消息成功放入发送队列，返回 `Ok(())`；
-    ///   如果未连接或发送通道不存在/已关闭，则返回 `Err(String)` 包含错误信息。
+    /// * `Result<(), String>`: 如果消息成功序列化并放入发送队列，则返回 `Ok(())`。
+    ///   如果当前未连接、序列化失败或发送时发生错误，则返回 `Err(String)`。
     pub async fn send_ws_message(&self, message: WsMessage) -> Result<(), String> {
-        let message_type_for_log = message.message_type.clone(); // 克隆用于日志，避免所有权问题
-        let payload_summary_for_log = message.payload.chars().take(70).collect::<String>(); // 日志中payload摘要
         info!(
-            "[SatOnSiteMobile] 尝试发送 WebSocket 消息: 类型='{}', 内容摘要='{}'", 
-            message_type_for_log, 
-            payload_summary_for_log
+            "[SatOnSiteMobile] WebSocketClientService::send_ws_message 调用，准备发送类型: {}, ID: {}", 
+            message.message_type, message.message_id
         );
-
         if !self.is_connected().await {
-            let err_msg = "发送消息失败：WebSocket 未连接。".to_string();
+            let err_msg = "无法发送消息：WebSocket 未连接。".to_string();
             error!("[SatOnSiteMobile] {}", err_msg);
             return Err(err_msg);
         }
 
         let mut sender_guard = self.ws_send_channel.lock().await;
         if let Some(sender) = sender_guard.as_mut() {
-            // 将 WsMessage 序列化为 JSON 字符串
-            let msg_json = match message.to_json_string_result() { // 使用 to_json_string_result 获取 Result
-                Ok(json_str) => json_str,
+            match serde_json::to_string(&message) { // 使用 serde_json::to_string
+                Ok(msg_json) => {
+                    match sender.send(TungsteniteMessage::Text(msg_json)).await {
+                        Ok(_) => {
+                            info!("[SatOnSiteMobile] 消息 (类型: {}, ID: {}) 已成功发送。", message.message_type, message.message_id);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            let err_msg = format!("发送 WebSocket 消息时发生错误: {}", e);
+                            error!("[SatOnSiteMobile] {}", err_msg);
+                            // 发送失败可能意味着连接已断开，可以触发错误处理或断开
+                            // Set is_connected to false to trigger cleanup in connection task
+                            *self.is_connected_status.write().await = false;
+                            Err(err_msg)
+                        }
+                    }
+                }
                 Err(e) => {
                     let err_msg = format!("序列化 WsMessage 失败: {}", e);
                     error!("[SatOnSiteMobile] {}", err_msg);
-                    return Err(err_msg);
-                }
-            };
-
-            // 发送 TungsteniteMessage::Text
-            match sender.send(TungsteniteMessage::Text(msg_json)).await {
-                Ok(_) => {
-                    info!("[SatOnSiteMobile] WebSocket 消息 (类型: {}) 已成功放入发送队列。", message_type_for_log);
-                    Ok(())
-                }
-                Err(e) => {
-                    let err_msg = format!("通过 WebSocket 发送消息失败: {}. 可能连接已断开。", e);
-                    error!("[SatOnSiteMobile] {}", err_msg);
-                    // 考虑在这里也调用 handle_on_error 或 disconnect 来处理状态变更
-                    // *self.is_connected_status.write().await = false; // 标记为未连接
-                    // Self::stop_heartbeat_task_static(&self.heartbeat_task_handle, &self.last_pong_received_at).await;
-                    // self.app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, ...);
                     Err(err_msg)
                 }
             }
         } else {
-            let err_msg = "发送消息失败：WebSocket 发送通道不存在。可能连接已断开或从未建立。".to_string();
+            let err_msg = "无法发送消息：WebSocket 发送通道不可用 (可能已断开)。".to_string();
             error!("[SatOnSiteMobile] {}", err_msg);
+            // If sender is None, connection is likely already considered disconnected.
+            // Ensure status reflects this.
+            *self.is_connected_status.write().await = false;
             Err(err_msg)
         }
     }
+
+     /// 获取当前缓存的任务调试状态。
+     /// 
+     /// # 返回
+     /// * `Option<TaskDebugState>`: 如果本地有缓存的状态，则返回其克隆；否则返回 `None`。
+     pub async fn get_cached_task_state(&self) -> Option<TaskDebugState> {
+        self.local_task_state_cache.read().await.clone()
+     }
 }
 
 // Default impl 如果 WebSocketClientService::new 需要 app_handle，则不能直接 Default

@@ -7,7 +7,7 @@
 
 use tauri::State;
 use log::{info, error};
-use crate::ws_client::WebSocketClientService;
+use crate::ws_client::service::{WebSocketClientService};
 use crate::config::WsClientConfig; // 注意：WsClientConfig 可能需要在 SatOnSiteMobile 中定义或调整
 use std::sync::Arc;
 use tauri::AppHandle;
@@ -18,7 +18,6 @@ use uuid::Uuid;
 use common_models::ws_payloads::{RegisterPayload, REGISTER_MESSAGE_TYPE};
 use common_models::enums::ClientRole;
 use tauri::Manager;
-use crate::ws_client::services::{AppState, WsRequest};
 
 /// 连接到云端 WebSocket 服务器。
 ///
@@ -135,7 +134,7 @@ pub async fn send_ws_echo(
     state: State<'_, Arc<WebSocketClientService>>,
     content: String,
 ) -> Result<(), String> {
-    info!("[SatOnSiteMobile] Tauri 命令 'send_ws_echo' 被调用, 发送内容: "{}"", content);
+    info!("[SatOnSiteMobile] Tauri 命令 'send_ws_echo' 被调用, 发送内容: {:?}", content);
     let ws_service = state.inner().clone();
 
     // 构建 EchoPayload
@@ -168,7 +167,7 @@ pub async fn send_ws_echo(
 
     match ws_service.send_ws_message(ws_message).await {
         Ok(_) => {
-            info!("[SatOnSiteMobile] Echo 消息 (内容: "{}") 已成功通过 WebSocket 服务发送。", content);
+            info!("[SatOnSiteMobile] Echo 消息 (内容: {:?}) 已成功通过 WebSocket 服务发送。", content);
             Ok(())
         }
         Err(e) => {
@@ -216,33 +215,33 @@ pub async fn register_client_with_task(
         }
     };
 
+    // 构建完整的 WsMessage，包含 message_id 和 timestamp
     let ws_message = WsMessage {
+        message_id: Uuid::new_v4().to_string(),
+        timestamp: Utc::now().timestamp_millis(),
         message_type: REGISTER_MESSAGE_TYPE.to_string(),
         payload: serialized_payload,
     };
 
-    let app_state = match app_handle.try_state::<AppState>() {
-        Some(state) => state,
+    // 获取 WsClientService 实例
+    let ws_service = match app_handle.try_state::<Arc<WebSocketClientService>>() {
+        Some(state) => state.inner().clone(),
         None => {
-            error!("无法从 Tauri AppHandle 获取 AppState (SatOnSiteMobile)。");
+            error!("无法从 Tauri AppHandle 获取 WebSocketClientService 状态 (SatOnSiteMobile)。");
             return Err("内部服务器错误: WebSocket 服务状态不可用".to_string());
         }
     };
-    
-    // 设置 WsService 上下文
-    app_state.ws_service.set_current_task_context(group_id.clone(), task_id.clone()).await;
-    info!("WsService 上下文已设置 (SatOnSiteMobile): group_id={}, task_id={}", group_id, task_id);
 
-    match app_state.ws_service.submit_request(WsRequest::SendMessage(ws_message)).await {
+    match ws_service.send_ws_message(ws_message).await {
         Ok(_) => {
             info!(
-                "已请求 WsService 发送 'Register' 消息 (SatOnSiteMobile), group_id: {}, task_id: {}",
+                "已通过 WsService 发送 'Register' 消息 (SatOnSiteMobile), group_id: {}, task_id: {}",
                 group_id, task_id
             );
             Ok(())
         }
         Err(e) => {
-            error!("请求 WsService 发送 'Register' 消息 (SatOnSiteMobile) 失败: {}", e);
+            error!("通过 WsService 发送 'Register' 消息 (SatOnSiteMobile) 失败: {}", e);
             Err(format!("发送注册消息失败: {}", e))
         }
     }

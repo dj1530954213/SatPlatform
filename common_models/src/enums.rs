@@ -7,6 +7,7 @@
 //! (如果适合作为 HashMap/HashSet 的键) 以支持数据交换、调试、实例复制、比较和集合操作。
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// 表示 WebSocket 客户端在系统中所扮演的角色。
 /// 
@@ -24,6 +25,30 @@ pub enum ClientRole {
     /// 代表一个角色尚未确定或未知的客户端。
     /// 这可能是客户端刚连接尚未完成注册流程时的初始状态，或者在某些错误/异常情况下使用。
     Unknown,
+}
+
+// 为 ClientRole 实现 Display trait
+impl fmt::Display for ClientRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 使用 Debug 格式化，它已经为我们生成了枚举成员的名称字符串
+        // 例如 ClientRole::ControlCenter 会变成 "ControlCenter"
+        write!(f, "{:?}", self)
+    }
+}
+
+/// 枚举：定义了预检查项的状态。
+/// 
+/// 根据规则 2.1，共享模型需派生 Serialize, Deserialize, Debug, Clone。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy)]
+pub enum PreCheckStatus {
+    /// 待检查
+    Pending,
+    /// 通过
+    Passed,
+    /// 未通过
+    Failed,
+    /// 跳过/不适用
+    Skipped, 
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ mod ws_client;  // WebSocket 客户端服务模块 (P2.1.1 - 现场端)
 mod commands;   // Tauri 命令定义模块 (P2.1.1 - 现场端)
 
 use std::sync::Arc;
-use ws_client::services::{AppState, setup_and_start_ws_service, WsRequest}; 
-use log::{info, error, warn, LevelFilter};
+use crate::ws_client::service::WebSocketClientService;
+use log::{info, LevelFilter};
 use tauri::Manager; // 引入 tauri::Manager trait 以使用 app.manage()
 use env_logger;
 
@@ -29,18 +29,21 @@ fn main() {
             info!("Tauri setup 钩子执行 (SatOnSiteMobile)...");
             let app_handle = app.handle();
 
-            let ws_url = String::from("ws://127.0.0.1:8088/ws_debug"); 
-            info!("WebSocket 服务 URL 配置为: {} (SatOnSiteMobile)", ws_url);
-
-            let ws_service_arc = setup_and_start_ws_service(app_handle.clone(), ws_url);
+            // 创建新的 WebSocketClientService 实例
+            let ws_service_instance = Arc::new(WebSocketClientService::new(app_handle.clone()));
             
-            app.manage(AppState { ws_service: ws_service_arc.clone() });
-            info!("AppState (包含 WsService) 已放入 Tauri 状态管理 (SatOnSiteMobile)。");
+            // 将新的服务实例放入 Tauri 状态管理
+            app.manage(ws_service_instance);
+            info!("WebSocketClientService 已放入 Tauri 状态管理 (SatOnSiteMobile)。");
 
             info!("Tauri setup 钩子执行完毕 (SatOnSiteMobile)。");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::general_cmds::connect_to_cloud,
+            commands::general_cmds::disconnect_from_cloud,
+            commands::general_cmds::check_ws_connection_status,
+            commands::general_cmds::send_ws_echo,
             commands::general_cmds::register_client_with_task,
             // 其他 SatOnSiteMobile 可能需要的命令
         ])
