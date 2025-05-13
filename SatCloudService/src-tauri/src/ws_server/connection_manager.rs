@@ -336,38 +336,51 @@ impl ConnectionManager {
                         
                         // 克隆需要在 drop(group) 之后使用的值
                         let group_id_for_cleanup = group.group_id.clone();
-                        let task_id_for_cleanup = group.task_id.clone(); // 确保 task_id 也被克隆
+                        let task_id_for_cleanup = group.task_id.clone(); // 保持克隆 task_id 以用于日志
 
                         if is_group_now_empty {
                             info!(
-                                "[连接管理器::组处理] 组 '{}' (任务ID: '{}') 在客户端 {} 移除后已变为空。即将调用 TaskStateManager 清理其任务状态...",
+                                "[连接管理器::组处理] 组 '{}' (任务ID: '{}') 在客户端 {} 移除后已变为空。即将清理其状态...",
                                 group_id_for_cleanup, task_id_for_cleanup, client_id
                             );
 
-                            // TaskStateManager 是 ConnectionManager 的一个成员 (Arc<TaskStateManager>)，因此它总是存在的。
-                            // 直接使用 self.task_state_manager 来调用其方法。
+                            // 修正：确保使用 group_id_for_cleanup 调用 TaskStateManager
                             if let Err(e) = self.task_state_manager.remove_task_state(&group_id_for_cleanup).await {
                                 error!(
-                                    "[连接管理器::组处理] 调用 TaskStateManager::remove_task_state 为组 '{}' 清理任务状态时发生错误: {:?}",
-                                    group_id_for_cleanup, e
+                                    "[连接管理器::组处理] 调用 TaskStateManager::remove_task_state 为组 '{}' (关联任务ID '{}') 清理任务状态时发生错误: {:?}",
+                                    group_id_for_cleanup, task_id_for_cleanup, e
                                 );
                             } else {
                                 info!(
-                                    "[连接管理器::组处理] 已成功调用 TaskStateManager::remove_task_state 为组 '{}' 清理任务状态。",
-                                    group_id_for_cleanup
+                                    "[连接管理器::组处理] 已成功请求 TaskStateManager::remove_task_state 为组 '{}' (关联任务ID '{}') 清理任务状态。",
+                                    group_id_for_cleanup, task_id_for_cleanup
                                 );
                             }
 
+                            // 在操作 self.groups (DashMap) 之前释放 group (RwLock) 的写锁，以策安全
+                            info!("[CM DEBUG] 在操作 self.groups 映射之前，为组ID '{}' 释放 Group 对象的写锁。", group_id_for_cleanup);
+                            drop(group); // 显式释放写锁
+
                             // 从 ConnectionManager 内部移除空组
-                            if self.groups.remove(&group_id_for_cleanup).is_some() {
-                                info!("[连接管理器::组处理] 空组 '{}' 已成功从 ConnectionManager 中移除。", group_id_for_cleanup);
+                            info!("[CM DEBUG] 即将为组ID '{}' 调用 self.groups.remove()。", group_id_for_cleanup);
+                            let removal_result = self.groups.remove(&group_id_for_cleanup);
+                            info!("[CM DEBUG] self.groups.remove() 调用完成。结果是否 Some (即是否找到并移除): {}", removal_result.is_some());
+
+                            if removal_result.is_some() {
+                                info!("[连接管理器::组处理] 空组 '{}' 已成功从 ConnectionManager 的 groups 映射中移除。", group_id_for_cleanup);
                             } else {
-                                warn!("[连接管理器::组处理] 尝试从 ConnectionManager 中移除空组 '{}'，但未找到该组。", group_id_for_cleanup);
+                                warn!("[连接管理器::组处理] 尝试从 ConnectionManager 的 groups 映射中移除空组 '{}'，但未找到该组。这可能表示状态不一致或已被其他线程移除。", group_id_for_cleanup);
                             }
+                        } else {
+                            // 组没有变空，不需要从 self.groups 中移除，但仍然需要释放写锁。
+                            info!("[CM DEBUG] 组 '{}' (任务ID '{}') 在客户端 {} 移除后并未变空。仅释放 Group 对象的写锁。", group.group_id, group.task_id, client_id);
+                            drop(group); // 显式释放写锁
                         }
 
-                        // 在这里显式释放写锁，因为后续的 self.groups.remove 和 self.task_state_manager 调用不应持有单个组的锁。
-                        drop(group); // group 的生命周期在此结束, group 在此之后不能再被直接使用
+                        // 注意：原先的 drop(group) 在 is_group_now_empty 块的末尾或对应的 else 块中。
+                        // 新的逻辑是，在 is_group_now_empty 为 true 时，在 self.groups.remove() 之前 drop。
+                        // 在 is_group_now_empty 为 false 时，也显式 drop。
+                        // 这样确保了锁在离开当前作用域前被释放，并且持有时间尽可能短。
 
                     } else { // group_id 存在于 client_session 中，但在 self.groups 中未找到该组
                         warn!(
@@ -670,10 +683,13 @@ impl ConnectionManager {
             group.on_site_mobile_client.as_ref().map(|cs| cs.client_id)
         );
 
-
         // --- 步骤 4: 通知组内伙伴关于当前客户端的上线状态 ---
         // (注意：此处的逻辑需要仔细处理，避免向自己发送通知，并正确识别伙伴)
         let mut partner_sessions_to_notify: Vec<Arc<ClientSession>> = Vec::new();
+        info!(
+            "[CM::join_group DBG_STEP_4_PRE_PARTNER_NOTIFY] Client {}: Starting partner notification logic.",
+            client_id
+        );
         
         // 根据当前客户端的角色，找到其伙伴。
         match requested_role {
@@ -696,7 +712,15 @@ impl ConnectionManager {
         }
 
         // 向识别出的伙伴发送上线通知。
-        for partner_session in partner_sessions_to_notify {
+        info!(
+            "[CM::join_group DBG_STEP_4A] Client {}: About to notify {} partners. Partners: {:?}", 
+            client_id, partner_sessions_to_notify.len(), partner_sessions_to_notify.iter().map(|p| p.client_id).collect::<Vec<_>>());
+
+        for (partner_idx, partner_session) in partner_sessions_to_notify.iter().enumerate() {
+            info!(
+                "[CM::join_group DBG_STEP_4B_LOOP_START] Client {}: Notifying partner #{} (ID: {}).", 
+                client_id, partner_idx, partner_session.client_id
+            );
             let partner_status_payload = PartnerStatusPayload {
                 partner_role: requested_role.clone(), // 上线的是当前客户端的角色
                 partner_client_id: client_id,         // 上线的是当前客户端的ID
@@ -724,11 +748,23 @@ impl ConnectionManager {
                     );
                 }
             }
+            info!(
+                "[CM::join_group DBG_STEP_4C_LOOP_END] Client {}: Finished notifying partner #{}", 
+                client_id, partner_idx
+            );
         }
+        info!(
+            "[CM::join_group DBG_STEP_4_COMPLETE] Client {}: Finished notifying all partners.", 
+            client_id
+        );
         
         // --- 步骤 5: 通知当前客户端其伙伴（如果已存在）的在线状态 ---
         // (在释放组的写锁前完成，以保证伙伴信息的一致性)
         let mut existing_partners_for_current_client: Vec<(ClientRole, Uuid)> = Vec::new();
+        info!(
+            "[CM::join_group DBG_STEP_5_PRE_SELF_NOTIFY] Client {}: Starting self-notification logic about existing partners.",
+            client_id
+        );
         match requested_role {
             ClientRole::ControlCenter => { // 当前客户端是控制中心，其伙伴是现场端
                 if let Some(on_site_client) = &group.on_site_mobile_client {
@@ -755,17 +791,29 @@ impl ConnectionManager {
         }
 
         // 为了简化，这里先收集信息，待会儿在锁外发送。
+        debug!(
+            "[CM::join_group DBG_STEP_5A] Client {}: About to drop group write lock before sending partner status to self. Partners collected: {:?}",
+            client_id, existing_partners_for_current_client
+        );
 
         // 临时释放组的写锁，以便可以安全地向当前客户端发送消息
         // 注意：这意味着在发送伙伴状态通知给当前客户端时，组的状态可能已经再次改变。
         // 这是一个需要权衡的设计点。如果要求严格一致性，则发送逻辑需要更复杂。
         // 当前设计：允许这种微小的时间窗口。
         drop(group); // 明确释放写锁
+        info!(
+            "[CM::join_group DBG_STEP_5B] Client {}: Group write lock released.",
+            client_id
+        );
 
-        for (partner_role, partner_client_id) in existing_partners_for_current_client {
+        for (partner_idx, (partner_role, partner_client_id)) in existing_partners_for_current_client.iter().enumerate() {
+            info!(
+                "[CM::join_group DBG_STEP_5C_LOOP_START] Client {}: Sending partner status to self. Partner #{} - Role: {:?}, ID: {}.",
+                client_id, partner_idx, partner_role, partner_client_id
+            );
              let partner_status_payload_for_self = PartnerStatusPayload {
                 partner_role: partner_role.clone(), // 这是已存在伙伴的角色 - 克隆 partner_role
-                partner_client_id, // 这是已存在伙伴的ID
+                partner_client_id: *partner_client_id, // 这是已存在伙伴的ID
                 is_online: true, // 因为伙伴仍在组内，所以是在线
                 group_id: group_id.clone(),
             };
@@ -790,10 +838,21 @@ impl ConnectionManager {
                     );
                 }
             }
+            info!(
+                "[CM::join_group DBG_STEP_5D_LOOP_END] Client {}: Finished sending partner status to self for partner #{}",
+                client_id, partner_idx
+            );
         }
-
+        info!(
+            "[CM::join_group DBG_STEP_5_COMPLETE] Client {}: Finished notifying self about all existing partners.",
+            client_id
+        );
 
         // --- 步骤 6: 返回成功的注册响应 ---
+        info!(
+            "[CM::join_group DBG_STEP_6_PRE_OK_RESPONSE] Client {}: Preparing to send OK RegisterResponse.",
+            client_id
+        );
         info!(
             "[连接管理器::注册] 客户端 {} 注册流程完成。角色: {:?}, 组ID: '{}' (任务ID: '{}')",
             client_id, requested_role, group_id, task_id // 使用原始 payload 中的 task_id
