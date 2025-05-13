@@ -29,6 +29,4 @@ pub mod service;
 /// 这样做使得其他模块 (例如 `main.rs` 或 `commands` 模块) 可以直接通过
 /// `crate::ws_client::WebSocketClientService` 路径来引用此核心服务结构体，
 /// 而无需关心其在 `ws_client` 模块内部的具体文件组织结构。
-pub use service::WebSocketClientService;
-
-pub mod services; 
+pub use service::WebSocketClientService; 

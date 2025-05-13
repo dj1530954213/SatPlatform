@@ -52,7 +52,7 @@
 // /// 定义与 WebSocket 客户端操作相关的各种错误情况。
 // #[derive(Error, Debug)] // 使用 thiserror 的 Error 宏自动派生 std::error::Error trait。
 //                         // 同时派生 Debug trait，方便在调试过程中打印错误信息。
-pub enum WsClientError {
+// pub enum WsClientError {
 //     /// 当尝试建立 WebSocket 连接到服务端失败时产生此错误。
 //     /// 字段 `String` 用于存储导致连接失败的具体原因或底层错误信息。
 //     #[error("WebSocket 连接到服务端失败: {0}")] // #[error(...)] 宏定义了此错误变体在通过 Display trait (由thiserror自动实现) 转换为字符串时的表现形式。
@@ -85,4 +85,5 @@ pub enum WsClientError {
 // }
 // ```
 
-// 模块主体当前为空，将在后续根据项目开发需要，逐步填充具体的错误枚举或结构体定义。 
+// 模块主体当前为空，将在后续根据项目开发需要，逐步填充具体的错误枚举或结构体定义。
+// 注意：上面的示例代码已被完全注释，不会参与编译。 

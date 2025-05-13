@@ -4,9 +4,8 @@
   <hr />
 
   <h2>1. WebSocket 连接</h2>
-  <button (click)="connectToCloud()">连接到云端 (ws://127.0.0.1:8088)</button>
-  <button (click)="triggerReconnect()">手动触发重新连接</button>
-  <p><strong>连接状态:</strong> {{ connectionStatusMessage }}</p>
+  <button (click)="connect()">连接到云端 ({{ wsUrl }})</button>
+  <p><strong>连接状态:</strong> {{ (connectionStatus$ | async)?.connected ? '已连接 (Client ID: ' + ((connectionStatus$ | async)?.client_id ?? 'N/A') + ')' : ('未连接' + ((connectionStatus$ | async)?.error_message ? ' - 错误: ' + (connectionStatus$ | async)?.error_message : '')) }}</p>
 
   <hr />
 
@@ -19,19 +18,29 @@
     <label for="taskId">任务ID (TaskID): </label>
     <input id="taskId" type="text" [(ngModel)]="taskId" />
   </div>
-  <button (click)="registerClient()" [disabled]="!groupId || !taskId">注册客户端到组和任务</button>
-  <p><strong>注册状态:</strong> {{ registrationStatusMessage }}</p>
+  <button (click)="register()" [disabled]="!(connectionStatus$ | async)?.connected || !groupId || !taskId">注册客户端到组和任务</button>
+  <p><strong>注册状态:</strong> 
+    <ng-container *ngIf="registrationStatus$ | async as status">
+      {{ status.success ? '成功注册到组 ' + status.group_id + (status.assigned_client_id ? ' (分配 Client ID: ' + status.assigned_client_id + ')' : '') : ('注册失败: ' + (status.message ?? '未知错误')) }}
+    </ng-container>
+    <ng-container *ngIf="!(registrationStatus$ | async)">未注册</ng-container>
+  </p>
 
   <hr />
 
   <h2>3. 伙伴客户端状态</h2>
-  <p><strong>伙伴状态:</strong> {{ partnerStatusMessage }}</p>
+  <p><strong>伙伴状态:</strong> 
+    <ng-container *ngIf="partnerStatus$ | async as status">
+      伙伴 {{ status.partner_role }} ({{ status.partner_client_id }}) {{ status.is_online ? '已上线' : '已下线' }} (组: {{ status.group_id }})
+    </ng-container>
+    <ng-container *ngIf="!(partnerStatus$ | async)">伙伴状态未知</ng-container>
+  </p>
 
   <hr />
 
   <h2>4. 任务调试状态 (TaskDebugState)</h2>
   <p><strong>当前任务状态 (JSON):</strong></p>
-  <pre>{{ taskStateString }}</pre>
+  <pre>{{ taskState$ | async | json }}</pre>
 
   <hr />
 
@@ -39,7 +48,7 @@
   <div>
     <label for="echoInput">要发送的内容: </label>
     <input id="echoInput" type="text" [(ngModel)]="echoInput" />
-    <button (click)="sendEcho()" [disabled]="!echoInput">发送 Echo</button>
+    <button (click)="sendEchoTest()" [disabled]="!(connectionStatus$ | async)?.connected || !echoInput">发送 Echo</button>
   </div>
   <p><strong>Echo 回复:</strong> {{ echoResponseMessage }}</p>
 

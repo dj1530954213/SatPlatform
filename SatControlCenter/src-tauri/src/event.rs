@@ -10,7 +10,9 @@
 //!   这些结构体通常会派生 `serde::Serialize` 以便能够被序列化为 JSON 并发送给前端，
 //!   同时也会派生 `Clone` 和 `Debug` 以方便使用。
 
-use serde::Serialize; // 引入 Serialize trait，用于将 Rust 结构体序列化为 JSON 等格式，以便在 Tauri 事件中传递给前端。
+use serde::{Deserialize, Serialize}; // 引入 Serialize trait，用于将 Rust 结构体序列化为 JSON 等格式，以便在 Tauri 事件中传递给前端。
+use common_models::{ClientRole, TaskDebugState};
+use uuid::Uuid;
 
 // --- 云端 WebSocket 连接状态相关事件名称常量 --- 
 
@@ -34,32 +36,19 @@ pub const EVENT_CLOUD_WS_CONNECT_FAILED: &str = "cloud-ws-connect-failed";
 
 // --- WebSocket 详细连接状态变更事件 --- 
 
-/// `WsConnectionStatusEvent` (WebSocket 连接状态事件) 的负载结构体定义。
+/// WebSocket 连接状态事件 (`ws_connection_status`) 的负载。
 ///
-/// 当 `SatControlCenter` 与云端服务 (`SatCloudService`) 的 WebSocket 连接状态发生任何显著变化时
-/// (例如：首次尝试连接、成功建立连接、连接意外断开、或主动断开连接后)，
-/// 后端会构建此结构体的实例，并作为负载通过名为 `WS_CONNECTION_STATUS_EVENT` 的 Tauri 事件发送给前端。
-/// 前端可以监听此事件，以实时更新UI界面上显示的连接状态，并根据情况执行相应的逻辑。
-#[derive(Clone, Serialize, Debug)] // 派生 Clone, Serialize, Debug trait
-                                 // - Clone: 允许创建此结构体实例的副本。
-                                 // - Serialize: 允许将此结构体实例序列化为 JSON，以便作为 Tauri 事件的负载发送给前端。
-                                 // - Debug: 允许使用 `{:?}` 格式化操作符打印此结构体实例，方便调试。
+/// 当 `ws_client::WebSocketClientService` 尝试连接 `SatCloudService` 或连接状态发生改变时，
+/// 由后端服务发出此事件，通知前端当前的连接状态。
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WsConnectionStatusEvent {
-    /// 指示当前 WebSocket 是否已成功连接到云端服务。
-    /// - `true`: 表示连接已建立且处于活动状态。
-    /// - `false`: 表示连接当前未建立，或已断开。
+    /// 指示是否已连接。
     pub connected: bool,
-
-    /// 当连接成功时，由云端服务 (`SatCloudService`) 分配给本控制中心客户端的唯一标识符 (`client_id`)。
-    /// - `Some(String)`: 如果 `connected` 为 `true` 且云端已成功分配 `client_id`，则此字段包含该 ID 字符串。
-    /// - `None`: 如果 `connected` 为 `false`，或者连接虽已建立但云端尚未完成 `client_id` 的分配与回传，则此字段为 `None`。
+    /// 如果连接成功，云端分配的客户端 ID (UUID 字符串)。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-
-    /// 当连接失败或意外断开时，此字段可能包含描述错误原因的文本信息。
-    /// - `Some(String)`: 如果 `connected` 为 `false` 是由于连接尝试失败、或已建立的连接因错误而中断，
-    ///   则此字段可能包含相关的错误提示信息。
-    /// - `None`: 如果 `connected` 为 `true`，或者 `connected` 为 `false` 但并非由明确的错误导致 (例如，用户主动断开连接且无异常)，
-    ///   则此字段通常为 `None`。
+    /// 如果连接失败或断开，相关的错误信息或原因。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
 }
 
@@ -94,30 +83,92 @@ pub struct WsConnectionStatusEvent {
 /// 
 /// setupWsStatusListener();
 /// ```
-pub const WS_CONNECTION_STATUS_EVENT: &str = "ws_connection_status_v1"; // 版本化事件名，例如添加 _v1，便于未来升级
+pub const WS_CONNECTION_STATUS_EVENT: &str = "ws_connection_status";
 
 // --- Echo (回声测试) 响应事件 (项目阶段 P2.2.1 引入) --- 
+
+/// Echo 测试响应事件 (`echo_response_event`) 的负载。
+///
+/// 当 `ws_client::WebSocketClientService` 收到来自云端的 Echo 响应消息时发出。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EchoResponseEventPayload {
+    /// Echo 的内容。
+    pub content: String,
+}
 
 /// `EchoResponseEventPayload` (Echo响应事件负载) 的标准事件名称常量。
 ///
 /// 当 `SatControlCenter` 的后端通过 WebSocket 向云端服务发送了一个 Echo (回声) 请求，
 /// 并且成功收到了云端的回声响应后，后端将使用此事件名称，
 /// 将包含原始响应内容的 `EchoResponseEventPayload` (Echo响应事件负载) 发送给前端。
-pub const ECHO_RESPONSE_EVENT: &str = "echo_response_event_v1"; // 版本化事件名
-
-/// Echo (回声测试) 响应事件的 Payload (负载) 结构体定义。
-///
-/// 当 `SatControlCenter` 的后端从云端服务 (`SatCloudService`) 收到一个 Echo (回声) 消息的回复时，
-/// 它会构建此结构体的实例，并将云端回复的原始文本内容填充到 `content` 字段中。
-/// 然后，此实例将作为负载，通过名为 `ECHO_RESPONSE_EVENT` 的 Tauri 事件发送给前端应用，
-/// 以便前端可以展示或处理这个回声响应。
-/// 添加 `Deserialize` 是为了与 `SatOnSiteMobile` (现场移动端) 项目中的对应事件负载结构体保持一致性，
-/// 尽管对于 `SatControlCenter` 作为事件的发送方，`Deserialize` 可能不是严格必需的，但保持一致性有助于减少潜在的混淆。
-#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
-pub struct EchoResponseEventPayload {
-    /// 从云端服务回声响应中获取到的原始文本内容。
-    pub content: String,
-}
+pub const ECHO_RESPONSE_EVENT: &str = "echo_response_event";
 
 // 提示：后续可以根据 `SatControlCenter` 应用的特定业务需求，在此文件中定义更多应用级的 Tauri 事件常量和负载结构体。
 // 例如，当 PLC 通信状态发生变化、或特定控制指令执行完成时，都可以定义相应的事件来通知前端。 
+
+/// WebSocket 注册状态事件 (`ws_registration_status`) 的负载。
+///
+/// 当 WebSocket 客户端尝试向云端注册并收到响应时，由后端服务发出此事件，
+/// 通知前端注册操作的结果。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WsRegistrationStatusEvent {
+    /// 指示注册是否成功。
+    pub success: bool,
+    /// 可选的附加信息，例如成功消息或失败原因。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// 客户端尝试注册或已成功注册到的组 ID。
+    pub group_id: String,
+    /// 如果注册成功，服务器分配给此客户端的唯一ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_client_id: Option<Uuid>,
+}
+
+pub const WS_REGISTRATION_STATUS_EVENT: &str = "ws_registration_status";
+
+/// WebSocket 伙伴状态事件 (`ws_partner_status`) 的负载。
+///
+/// 当云端通知有伙伴（例如现场端）上线或下线时，由后端服务发出此事件，
+/// 通知前端伙伴的状态变化。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WsPartnerStatusEvent {
+    /// 发生状态变化的伙伴的角色。
+    pub partner_role: ClientRole,
+    /// 发生状态变化的伙伴的客户端 ID。
+    pub partner_client_id: Uuid,
+    /// 指示伙伴是否在线 (true 表示上线/加入组，false 表示下线/离开组)。
+    pub is_online: bool,
+    /// 相关的组 ID。
+    pub group_id: String,
+}
+
+pub const WS_PARTNER_STATUS_EVENT: &str = "ws_partner_status";
+
+/// 本地任务状态更新事件 (`local_task_state_updated`) 的负载。
+///
+/// 当 `ws_client::WebSocketClientService` 从云端收到 `TaskStateUpdate` 消息并更新了
+/// 本地缓存的 `TaskDebugState` 后，发出此事件，将最新的完整状态通知给前端。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalTaskStateUpdatedEvent {
+    /// 从云端接收到的、最新的完整任务调试状态。
+    pub new_state: TaskDebugState,
+}
+
+pub const LOCAL_TASK_STATE_UPDATED_EVENT: &str = "local_task_state_updated";
+
+// --- (可选) 服务端错误事件 ---
+
+/// 服务端错误事件 (`ws_server_error`) 的负载。
+///
+/// 当 `ws_client::WebSocketClientService` 收到来自云端的明确错误响应消息
+/// (例如 `ErrorResponse` 类型) 时，可以发出此事件通知前端。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WsServerErrorEvent {
+    /// 原始导致错误的请求消息类型（如果可用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_message_type: Option<String>,
+    /// 服务端返回的错误描述信息。
+    pub error: String,
+}
+
+pub const WS_SERVER_ERROR_EVENT: &str = "ws_server_error"; 

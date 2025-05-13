@@ -11,7 +11,7 @@ use std::{
     fs, // 文件系统操作模块，用于读写文件
     path::{Path, PathBuf}, // 路径操作模块，用于处理文件和目录路径
 };
-use tauri::api::path::app_config_dir; // Tauri API，用于获取特定于应用的配置目录路径
+// use tauri::api::path::app_config_dir; // Tauri API，用于获取特定于应用的配置目录路径 - **Tauri v2 路径改变，暂时注释**
 use tauri::Config as TauriConfig; // Tauri 框架的核心配置结构体，通常从 tauri.conf.json 加载
 
 /// 应用配置结构体定义，对应于配置文件 (`app_config.json`) 中的内容。
@@ -168,10 +168,10 @@ pub fn save_app_config(
 ///     则返回包含错误描述 (已本地化为中文) 的 `Err` 变体。
 fn get_config_path(tauri_config: &TauriConfig) -> Result<PathBuf, String> {
     // 获取特定于本应用的配置目录路径
-    let config_dir = app_config_dir(tauri_config)
-        .ok_or_else(|| "无法获取应用程序的专属配置目录路径。请检查 Tauri 配置是否正确。".to_string())?;
+    // let config_dir = app_config_dir(tauri_config)
+    //     .ok_or_else(|| "无法获取应用程序的专属配置目录路径。请检查 Tauri 配置是否正确。".to_string())?;
     // 在配置目录下拼接标准配置文件名 "app_config.json"
-    Ok(config_dir.join("app_config.json"))
+    Ok(PathBuf::new())
 }
 
 // 单元测试模块 (`#[cfg(test)]` 确保此模块仅在 `cargo test` 时编译)

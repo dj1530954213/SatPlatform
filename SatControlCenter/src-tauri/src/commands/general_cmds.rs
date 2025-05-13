@@ -12,24 +12,20 @@
 //! 通过 Tauri 的 `invoke` API 被调用。
 
 use tauri::State; // Tauri 核心库，用于在命令中注入托管状态 (Managed State)。
-use log::{info, error}; // `log` crate，用于在后端记录不同级别的日志信息 (信息、错误等)。
+use log::{info, error, debug, warn}; // `log` crate，用于在后端记录不同级别的日志信息 (信息、错误等)。
 // use crate::ws_client::service::WsClientService; // 旧的或错误的导入路径，已被注释或将在后续清理中移除。
 use crate::ws_client::WebSocketClientService; // 从 `ws_client` 模块导入核心的 WebSocket 客户端服务结构体。
-use crate::config::WsClientConfig; // 从 `config` 模块导入 `WsClientConfig`，用于加载 WebSocket 客户端配置 (如默认URL)。
-use std::sync::Arc; // `Arc` (原子引用计数)，`WebSocketClientService` 通过 `Arc` 实现共享所有权，并安全地在多线程/异步任务间传递。
-use tauri::AppHandle; // Tauri 应用句柄，提供对应用核心功能的访问，例如发送事件、管理窗口等。在此处主要用于Tauri的State注入机制，服务本身会持有克隆的句柄。
-use rust_websocket_utils::message::WsMessage; // 从 `rust_websocket_utils` 导入标准的 WebSocket 消息结构体。
-use common_models; // 导入 `common_models` crate，用于访问共享的数据模型，例如 `EchoPayload` 和消息类型常量。
+use common_models::{ // 直接从 common_models 根导入
+    ClientRole,
+    WsMessage, // 这个是正确的 WsMessage
+    EchoPayload, RegisterPayload,
+    ECHO_MESSAGE_TYPE, REGISTER_MESSAGE_TYPE,
+};
 use chrono::Utc; // `chrono` crate，用于获取当前的 UTC 时间戳。
 use uuid::Uuid; // `uuid` crate，用于生成唯一的 UUID (通用唯一标识符)，例如为 `WsMessage` 生成 `message_id`。
+use tauri::AppHandle; // Tauri 应用句柄，提供对应用核心功能的访问，例如发送事件、管理窗口等。在此处主要用于Tauri的State注入机制，服务本身会持有克隆的句柄。
 use tauri::Manager; // 用于获取 AppHandle 和访问状态
-use common_models::{
-    enums::ClientRole,
-    ws_messages::WsMessage, // 假设 WsMessage 在 common_models::ws_messages 中定义
-    ws_payloads::{RegisterPayload, REGISTER_MESSAGE_TYPE},
-};
-// 确保 WsRequest 和 AppState 的路径正确
-use crate::ws_client::services::{AppState, WsRequest}; // 假设 WsService 实例在 AppState 中
+use std::sync::Arc; // 原子引用计数智能指针，用于共享状态
 
 /// Tauri 命令：连接到云端 WebSocket 服务器。
 ///
@@ -53,38 +49,21 @@ use crate::ws_client::services::{AppState, WsRequest}; // 假设 WsService 实�
 #[tauri::command] // 将此 Rust 函数标记为一个可从前端调用的 Tauri 命令。
 pub async fn connect_to_cloud(
     _app_handle: AppHandle, // AppHandle 参数主要用于 Tauri 的状态注入机制，服务本身会持有自己的句柄副本。
-    state: State<'_, Arc<WebSocketClientService>>, // 注入 WebSocket 客户端服务状态
-    url: Option<String>, // 可选的 WebSocket 服务器 URL
+    ws_service: State<'_, Arc<WebSocketClientService>>,
+    url: String,
 ) -> Result<(), String> {
-    info!("Tauri 命令 'connect_to_cloud' (连接到云服务) 被调用，URL 参数: {:?}", url);
-
-    // 从 Tauri State 中获取 WebSocketClientService 的克隆 (Arc 的克隆是轻量级的)
-    let ws_service = state.inner().clone();
-
-    // 确定最终要连接的 URL
-    let connect_url = match url {
-        Some(u) => u, // 如果前端提供了 URL，则使用该 URL
-        None => { // 如果前端未提供 URL，则尝试从配置文件加载默认 URL
-            info!("命令 'connect_to_cloud': URL 未在参数中提供，尝试从配置加载默认的云端 WebSocket URL...");
-            // 注意：WsClientConfig::load() 可能会失败，这里简化处理，实际项目中应处理其 Result
-            // 假设 WsClientConfig::load() 总是成功或 panic (不推荐)，或者其错误已在内部转为默认值
-            let client_config = WsClientConfig::load(); // 加载客户端配置
-            client_config.cloud_ws_url // 返回配置中的云端 WebSocket URL
-        }
-    };
-
-    info!("命令 'connect_to_cloud': 最终连接目标 URL 为: {}", connect_url);
-
-    // 调用 WebSocketClientService 的 connect 方法来启动连接过程
-    // 注意：connect 方法是异步的，它会立即返回一个 Future，实际的连接建立在后台进行。
-    match ws_service.connect(&connect_url).await { // `await` 在这里等待 connect 方法内部的异步操作完成一个阶段 (如任务创建)
+    info!(
+        "接收到 Tauri 命令 'connect_to_cloud'，目标 URL: {}",
+        url
+    );
+    match ws_service.connect(&url).await {
         Ok(_) => {
-            info!("命令 'connect_to_cloud': WebSocket 连接过程已成功启动。");
-            Ok(()) // 表示连接过程启动成功
+            info!("WebSocket 连接过程已成功启动。");
+            Ok(())
         }
         Err(e) => {
-            error!("命令 'connect_to_cloud': 尝试启动 WebSocket 连接失败: {}", e);
-            Err(format!("连接到云端服务失败，请检查网络或配置。错误详情: {}", e)) // 向前端返回格式化的错误信息
+            error!("启动 WebSocket 连接过程失败: {}", e);
+            Err(format!("Failed to start WebSocket connection: {}", e))
         }
     }
 }
@@ -103,20 +82,17 @@ pub async fn connect_to_cloud(
 ///   - `Err(String)`: 如果在尝试断开连接时发生错误，则返回包含本地化错误描述的 `Err`。
 #[tauri::command]
 pub async fn disconnect_from_cloud(
-    state: State<'_, Arc<WebSocketClientService>>, // 注入 WebSocket 客户端服务状态
+    ws_service: State<'_, Arc<WebSocketClientService>>,
 ) -> Result<(), String> {
-    info!("Tauri 命令 'disconnect_from_cloud' (从云服务断开) 被调用。");
-    let ws_service = state.inner().clone(); // 获取服务实例
-
-    // 调用 WebSocketClientService 的 disconnect 方法
+    info!("接收到 Tauri 命令 'disconnect_from_cloud'");
     match ws_service.disconnect().await {
         Ok(_) => {
-            info!("命令 'disconnect_from_cloud': 断开连接请求已成功处理。");
+            info!("WebSocket 断开操作已成功启动或已断开。");
             Ok(())
         }
         Err(e) => {
-            error!("命令 'disconnect_from_cloud': 尝试断开 WebSocket 连接失败: {}", e.to_string());
-            Err(format!("断开与云端服务的连接时发生错误: {}", e.to_string()))
+            error!("启动 WebSocket 断开操作失败: {}", e);
+            Err(format!("Failed to start WebSocket disconnection: {}", e))
         }
     }
 }
@@ -164,124 +140,107 @@ pub async fn check_ws_connection_status(
 ///     则返回包含本地化错误描述的 `Err`。
 #[tauri::command]
 pub async fn send_ws_echo(
-    state: State<'_, Arc<WebSocketClientService>>, // 注入 WebSocket 客户端服务状态
-    content: String, // 要发送的回声内容
+    ws_service: State<'_, Arc<WebSocketClientService>>,
+    content: String,
 ) -> Result<(), String> {
-    info!("Tauri 命令 'send_ws_echo' (发送WebSocket回声消息) 被调用, 内容: \"{}\"", content);
-    let ws_service = state.inner().clone(); // 获取服务实例
-
-    // 步骤 1: 构建 `EchoPayload` (回声消息负载)
-    // `EchoPayload` 是在 `common_models::ws_payloads` 中定义的共享数据结构。
-    let echo_payload = common_models::ws_payloads::EchoPayload { content }; // 使用传入的 content 创建负载
-
-    // 步骤 2: 将 `EchoPayload` 序列化为 JSON 字符串
-    // WebSocket 消息的 `payload` 字段通常是 JSON 字符串。
+    debug!(
+        "接收到 Tauri 命令 'send_ws_echo'，内容: '{}'",
+        content
+    );
+    if !ws_service.is_connected().await {
+        let err_msg = "无法发送 Echo：WebSocket 未连接。".to_string();
+        warn!("{}", err_msg);
+        return Err(err_msg);
+    }
+    let echo_payload = EchoPayload { content };
     let payload_json = match serde_json::to_string(&echo_payload) {
-        Ok(json_string) => json_string, // 序列化成功，得到 JSON 字符串
+        Ok(json) => json,
         Err(e) => {
-            let error_message = format!("命令 'send_ws_echo': 序列化 EchoPayload (回声消息负载) 失败: {}", e);
-            error!("{}", error_message); // 记录详细错误日志
-            return Err(error_message); // 向前端返回错误信息
+            let err_msg = format!("序列化 EchoPayload 失败: {}", e);
+            error!("{}", err_msg);
+            return Err(err_msg);
         }
     };
-
-    // 步骤 3: 构建 `WsMessage` (标准 WebSocket 消息)
-    // `WsMessage` 是在 `rust_websocket_utils` 中定义的标准消息结构，用于封装所有通过 WebSocket 发送的数据。
+    // **确保这里使用的是 common_models::WsMessage**
     let ws_message = WsMessage {
-        message_id: Uuid::new_v4().to_string(), // 为消息生成一个唯一的 ID
-        timestamp: Utc::now().timestamp_millis(), // 记录当前 UTC 时间戳 (毫秒)
-        message_type: common_models::ws_payloads::ECHO_MESSAGE_TYPE.to_string(), // 设置消息类型为 Echo
-        payload: payload_json, // 将序列化后的 EchoPayload JSON 字符串作为负载
+        message_id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        message_type: ECHO_MESSAGE_TYPE.to_string(),
+        payload: payload_json,
     };
-    info!("命令 'send_ws_echo': 已构建 WsMessage (WebSocket消息), 消息ID: {}, 类型: {}", ws_message.message_id, ws_message.message_type);
-
-    // 步骤 4: 通过 WebSocketClientService 发送 `WsMessage`
-    match ws_service.send_ws_message(ws_message).await {
+    // **调用 ws_service 的 send_ws_message**
+    match ws_service.send_ws_message(ws_message).await { // 类型应该匹配
         Ok(_) => {
-            info!("命令 'send_ws_echo': Echo (回声) 消息已成功通过 WebSocketClientService 提交发送。");
-            Ok(()) // 表示发送操作成功启动
+            debug!("Echo 消息已成功提交到发送队列。");
+            Ok(())
         }
         Err(e) => {
-            let error_message = format!("命令 'send_ws_echo': 发送 Echo (回声) 消息时发生错误: {}", e);
-            error!("{}", error_message); // 记录详细错误日志
-            Err(error_message) // 向前端返回错误信息
+            error!("提交 Echo 消息到发送队列失败: {}", e);
+            Err(format!("Failed to send Echo message: {}", e))
         }
     }
 }
 
-/// Tauri 命令，用于客户端向云端发起注册请求，并关联一个特定的任务。
+/// Tauri 命令：注册客户端到云端并关联特定任务。
+///
+/// 当前端（Angular）用户发起注册操作时调用此命令。
+/// 它负责构建注册负载，并通过 WebSocket 服务将注册消息发送到云端。
 ///
 /// # Arguments
-/// * `app_handle` - Tauri 应用句柄，用于访问共享状态（如 WsService）。
-/// * `group_id` - 用户希望加入或创建的调试组的ID。
-/// * `task_id` - 当前要进行的调试任务的唯一标识。
+///
+/// * `group_id` - 用户希望加入或创建的组的标识符。
+/// * `task_id` - 用户希望关联的调试任务的唯一标识符。
+/// * `ws_service` - 通过 Tauri 状态管理的 WebSocket 客户端服务实例。
 ///
 /// # Returns
-/// * `Result<(), String>` - 操作成功则返回 Ok(()), 失败则返回包含错误信息的 Err。
+///
+/// * `Result<(), String>` - 成功时返回 `Ok(())`，失败时返回包含错误信息的 `Err(String)`。
+///   注意：这个结果仅表示尝试发送消息的操作是否成功启动，
+///   实际的注册成功与否需要通过监听 `WsRegistrationStatusEvent` 事件来获知。
 #[tauri::command]
 pub async fn register_client_with_task(
-    app_handle: tauri::AppHandle,
     group_id: String,
     task_id: String,
+    ws_service: State<'_, Arc<WebSocketClientService>>,
 ) -> Result<(), String> {
     info!(
-        "Tauri 命令 'register_client_with_task' 被调用, group_id: {}, task_id: {}",
+        "接收到 Tauri 命令 'register_client_with_task'：组ID='{}', 任务ID='{}'",
         group_id, task_id
     );
-
-    // 构建 RegisterPayload
+    if !ws_service.is_connected().await {
+        let err_msg = "无法注册：WebSocket 未连接。请先连接。".to_string();
+        warn!("{}", err_msg);
+        return Err(err_msg);
+    }
     let register_payload = RegisterPayload {
-        group_id: group_id.clone(),
-        role: ClientRole::ControlCenter, // 对于 SatControlCenter，角色固定为 ControlCenter
-        task_id: task_id.clone(),
+        group_id,
+        role: ClientRole::ControlCenter,
+        task_id,
     };
-
-    // 序列化 RegisterPayload 为 JSON 字符串
-    let serialized_payload = match serde_json::to_string(&register_payload) {
-        Ok(json_str) => json_str,
+    let payload_json = match serde_json::to_string(&register_payload) {
+        Ok(json) => json,
         Err(e) => {
-            error!("序列化 RegisterPayload 失败: {}", e);
-            return Err(format!("构建注册请求失败 (序列化错误): {}", e));
+            let err_msg = format!("序列化 RegisterPayload 失败: {}", e);
+            error!("{}", err_msg);
+            return Err(err_msg);
         }
     };
-
-    // 创建 WsMessage
-    // 假设 WsMessage 结构体包含 message_type 和 payload。
-    // 如果 WsMessage 还需要 correlation_id 或 timestamp，需要在这里生成并填充。
+    // **确保这里使用的是 common_models::WsMessage**
     let ws_message = WsMessage {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
         message_type: REGISTER_MESSAGE_TYPE.to_string(),
-        payload: serialized_payload,
-        // correlation_id: Some(uuid::Uuid::new_v4().to_string()), // 示例：如果需要
-        // timestamp: Some(chrono::Utc::now().to_rfc3339()),      // 示例：如果需要
+        payload: payload_json,
     };
-
-    // 从 AppState 获取 WsService 实例的引用
-    let app_state = match app_handle.try_state::<AppState>() {
-        Some(state) => state,
-        None => {
-            error!("无法从 Tauri AppHandle 获取 AppState。WsService 可能未正确初始化。");
-            return Err("内部服务器错误: WebSocket 服务状态不可用".to_string());
-        }
-    };
-
-    // 在调用 submit_request 之前，先调用 WsService 的 set_current_task_context
-    // 这样 WsService 在处理 RegisterResponse 时，可以知道 task_id
-    app_state.ws_service.set_current_task_context(group_id.clone(), task_id.clone()).await;
-    info!("WsService 上下文已设置: group_id={}, task_id={}", group_id, task_id);
-
-
-    // 通过 WsService 发送消息
-    match app_state.ws_service.submit_request(WsRequest::SendMessage(ws_message)).await {
+    // **调用 ws_service 的 send_ws_message**
+    match ws_service.send_ws_message(ws_message).await { // 类型应该匹配
         Ok(_) => {
-            info!(
-                "已请求 WsService 发送 'Register' 消息, group_id: {}, task_id: {}",
-                group_id, task_id
-            );
+            info!("注册 ('Register') 消息已成功提交到发送队列。");
             Ok(())
         }
         Err(e) => {
-            error!("请求 WsService 发送 'Register' 消息失败: {}", e);
-            Err(format!("发送注册消息失败: {}", e))
+            error!("提交注册 ('Register') 消息到发送队列失败: {}", e);
+            Err(format!("Failed to send registration message: {}", e))
         }
     }
 }
