@@ -1,1 +1,6 @@
-/* You can add global styles to this file, and also import other style files */
+/* 
+  全局样式文件。
+  你可以在这个文件中添加全局CSS样式，它们会影响应用中的所有组件。
+  同时，你也可以在这里导入其他的样式文件 (例如，来自第三方库的CSS或你自己组织的其他CSS模块)。
+  当前文件为空，可以根据项目需求添加全局样式。
+*/

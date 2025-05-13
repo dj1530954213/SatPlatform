@@ -2,223 +2,287 @@ import { Component, OnInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { FormsModule } from '@angular/forms'; // 保留 FormsModule，中心端也有
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { TauriListenerService, PartnerInfo } from './core/services/tauri-listener.service'; // 确保路径正确
+import { CommonModule } from '@angular/common'; // 引入 CommonModule
 
 // WebSocket 连接状态事件的 Payload (与 Rust 端 WsConnectionStatusEventPayload 对应)
 interface WsConnectionStatusEventPayload {
+  /**
+   * @description 是否已连接
+   */
   connected: boolean;
+  /**
+   * @description 客户端ID，连接成功时由云端分配
+   */
   client_id?: string | null;
+  /**
+   * @description 错误信息，连接失败或断开时可能包含
+   */
   error_message?: string | null;
 }
 
 // 客户端注册状态事件的 Payload
 interface WsRegistrationStatusEventPayload {
+  /**
+   * @description 注册是否成功
+   */
   success: boolean;
+  /**
+   * @description 附加消息，成功或失败时可能包含更详细的说明
+   */
   message?: string | null;
+  /**
+   * @description 客户端成功注册后分配到的组ID
+   */
   group_id?: string | null;
+  /**
+   * @description 客户端成功注册后分配到的任务ID
+   */
   task_id?: string | null;
-}
-
-// 伙伴客户端状态事件的 Payload
-interface WsPartnerStatusEventPayload {
-  partner_role: string;
-  is_online: boolean;
+  /**
+   * @description （可选）云端分配给客户端的唯一标识，注册成功时返回。
+   * @remark Rust 端事件 WsRegistrationStatusEvent 包含 assigned_client_id
+   */
+  assigned_client_id?: string | null;
 }
 
 // Echo 响应事件的 Payload (与 Rust 端 EchoResponseEventPayload 对应)
 interface EchoResponseEventPayload {
+  /**
+   * @description Echo响应的具体内容
+   */
   content: string;
 }
 
 // 本地任务状态更新事件的 Payload (Rust 端发送 TaskDebugState)
 interface LocalTaskStateUpdatedEventPayload {
-  new_state: any; // 假设 new_state 是 TaskDebugState 的 JSON 结构，实际类型需要根据 common_models 定义
+  /**
+   * @description 新的任务状态对象。其具体结构应与 common_models 中定义的 TaskDebugState 一致。
+   *              在TypeScript中通常表示为 any 或更具体的接口（如果已定义）。
+   */
+  new_state: any;
 }
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [FormsModule], // 确保 FormsModule 在 imports 数组中
+  imports: [FormsModule, CommonModule], // 添加 CommonModule 到 imports
   templateUrl: './app.component.html',
   styleUrls: ['./app.component.css']
 })
 export class AppComponent implements OnInit, OnDestroy {
-  private unlistenConnectionStatus?: UnlistenFn;
-  private unlistenRegistrationStatus?: UnlistenFn;
-  private unlistenPartnerStatus?: UnlistenFn;
-  private unlistenTaskStateUpdate?: UnlistenFn;
-  private unlistenEcho?: UnlistenFn;
+  // private unlistenConnectionStatus?: UnlistenFn; // 由 TauriListenerService 处理
+  // private unlistenRegistrationStatus?: UnlistenFn; // 由 TauriListenerService 处理
+  private unlistenPartnerStatus?: UnlistenFn; // 由 TauriListenerService 处理, 但我们直接用其 Observable
+  // private unlistenTaskStateUpdate?: UnlistenFn; // 由 TauriListenerService 处理
+  // private unlistenEcho?: UnlistenFn; // 由 TauriListenerService 处理
 
+  /**
+   * @description WebSocket 连接状态的文字描述，用于UI显示
+   */
   connectionStatusMessage: string = '等待连接...';
+  /**
+   * @description 客户端注册状态的文字描述，用于UI显示
+   */
   registrationStatusMessage: string = '尚未注册';
-  partnerStatusMessage: string = '伙伴状态未知';
+  // partnerStatusMessage: string = '伙伴状态未知'; // 将由下面的 partnerInfo 对象驱动
+  /**
+   * @description 任务状态的字符串表示，用于UI显示（通常是JSON格式化后的 TaskDebugState）
+   */
   taskStateString: string = '任务状态未初始化';
 
+  /**
+   * @description Echo 功能的输入内容，双向绑定到UI输入框
+   */
   echoInput: string = '你好，云端！来自 SatOnSiteMobile。';
+  /**
+   * @description Echo 功能收到的回复消息，用于UI显示
+   */
   echoResponseMessage: string = '等待 Echo 回复...';
 
+  /**
+   * @description 目标任务组ID，双向绑定到UI输入框
+   */
   groupId: string = 'test_group_01';
+  /**
+   * @description 目标任务ID，双向绑定到UI输入框
+   */
   taskId: string = 'test_task_001';
 
-  constructor(private cdr: ChangeDetectorRef) {
-    console.log('[SatOnSiteMobile] AppComponent constructor');
+  /**
+   * @description 用于存储从服务获取的伙伴信息
+   */
+  partnerInfo: PartnerInfo | null = null;
+  /**
+   * @description 用于保存对伙伴状态 Observable 的订阅，以便在组件销毁时取消订阅
+   */
+  private partnerStatusSubscription: any; // 类型应为 Subscription，但原始文件为 any，保持不变
+
+  constructor(private cdr: ChangeDetectorRef, private tauriListenerService: TauriListenerService) {
+    console.log('[现场移动端] AppComponent 组件构造函数初始化');
   }
 
   async ngOnInit(): Promise<void> {
-    console.log('[SatOnSiteMobile] AppComponent ngOnInit');
+    console.log('[现场移动端] AppComponent 组件 ngOnInit 生命周期钩子执行');
 
-    if (!this.unlistenConnectionStatus) {
-      try {
-        this.unlistenConnectionStatus = await listen<WsConnectionStatusEventPayload>('ws_connection_status', (event) => {
-          console.log('[SatOnSiteMobile] 接收到 Tauri 事件 "ws_connection_status":', event.payload);
-          this.connectionStatusMessage = event.payload.connected
-            ? `已连接 (客户端ID: ${event.payload.client_id || '未知'})`
-            : `已断开 (原因: ${event.payload.error_message || '未知'})`;
-          this.cdr.detectChanges();
-        });
-        console.log('[SatOnSiteMobile] 成功监听 "ws_connection_status" 事件。');
-      } catch (error) {
-        console.error('[SatOnSiteMobile] 设置 "ws_connection_status" 监听器失败:', error);
-        this.connectionStatusMessage = '监听连接状态事件失败';
-      }
-    }
+    // 初始化 Tauri 事件监听器 (TauriListenerService 会处理所有事件的监听设置)
+    await this.tauriListenerService.initializeListeners();
+    console.log('[现场移动端 AppComponent] Tauri 事件监听器已通过服务初始化');
 
-    if (!this.unlistenRegistrationStatus) {
-      try {
-        this.unlistenRegistrationStatus = await listen<{ success: boolean; message?: string | null; assigned_client_id?: string | null; group_id?: string | null; task_id?: string | null; }>('ws_registration_status_event', (event) => {
-          console.log('[SatOnSiteMobile] 接收到 Tauri 事件 "ws_registration_status_event":', event.payload);
-          if (event.payload.success) {
-            this.registrationStatusMessage = `注册成功 (分配ID: ${event.payload.assigned_client_id || '未分配'}, 组: ${event.payload.group_id || 'N/A'}, 任务: ${event.payload.task_id || 'N/A'})`;
-          } else {
-            this.registrationStatusMessage = `注册失败: ${event.payload.message || '未知错误'}`;
-          }
-          this.cdr.detectChanges();
-        });
-        console.log('[SatOnSiteMobile] 成功监听 "ws_registration_status_event" 事件。');
-      } catch (error) {
-        console.error('[SatOnSiteMobile] 设置 "ws_registration_status_event" 监听器失败:', error);
-        this.registrationStatusMessage = '监听注册状态事件失败';
+    // 订阅连接状态从服务
+    this.tauriListenerService.connectionStatus$.subscribe(payload => {
+      if (payload) {
+        this.connectionStatusMessage = payload.connected
+          ? `已连接 (客户端ID: ${payload.client_id || '未知'})`
+          : `已断开 (原因: ${payload.error_message || '未知原因'})`;
+        this.cdr.detectChanges();
       }
-    }
+    });
 
-    if (!this.unlistenPartnerStatus) {
-      try {
-        this.unlistenPartnerStatus = await listen<WsPartnerStatusEventPayload>('ws_partner_status_event', (event) => {
-          console.log('[SatOnSiteMobile] 接收到 Tauri 事件 "ws_partner_status_event":', event.payload);
-          this.partnerStatusMessage = `${event.payload.partner_role} ${event.payload.is_online ? '已上线' : '已离线'}`;
-          this.cdr.detectChanges();
-        });
-        console.log('[SatOnSiteMobile] 成功监听 "ws_partner_status_event" 事件。');
-      } catch (error) {
-        console.error('[SatOnSiteMobile] 设置 "ws_partner_status_event" 监听器失败:', error);
-        this.partnerStatusMessage = '监听伙伴状态事件失败';
+    // 订阅注册状态从服务
+    this.tauriListenerService.registrationStatus$.subscribe(payload => {
+      if (payload) {
+        if (payload.success) {
+          this.registrationStatusMessage = `注册成功 (分配客户端ID: ${payload.assigned_client_id || '未分配'}, 组ID: ${payload.group_id || '无'}, 任务ID: ${payload.task_id || '无'})`;
+        } else {
+          this.registrationStatusMessage = `注册失败: ${payload.message || '未知错误'}`;
+        }
+        this.cdr.detectChanges();
       }
-    }
+    });
 
-    if (!this.unlistenTaskStateUpdate) {
-      try {
-        this.unlistenTaskStateUpdate = await listen<LocalTaskStateUpdatedEventPayload>('local_task_state_updated_event', (event) => {
-          console.log('[SatOnSiteMobile] 接收到 Tauri 事件 "local_task_state_updated_event":', event.payload);
-          this.taskStateString = JSON.stringify(event.payload.new_state, null, 2);
-          this.cdr.detectChanges();
-        });
-        console.log('[SatOnSiteMobile] 成功监听 "local_task_state_updated_event" 事件。');
-      } catch (error) {
-        console.error('[SatOnSiteMobile] 设置 "local_task_state_updated_event" 监听器失败:', error);
-        this.taskStateString = '监听任务状态更新事件失败';
-      }
-    }
+    // 新增：订阅伙伴状态从服务
+    this.partnerStatusSubscription = this.tauriListenerService.partnerStatus$.subscribe(info => {
+      console.log('[现场移动端 AppComponent] 从服务接收到伙伴信息更新:', info);
+      this.partnerInfo = info;
+      this.cdr.detectChanges(); // 手动触发变更检测
+    });
 
-    if (!this.unlistenEcho) {
-      try {
-        this.unlistenEcho = await listen<EchoResponseEventPayload>('echo_response_event', (event) => {
-          console.log('[SatOnSiteMobile] 接收到 Tauri 事件 "echo_response_event":', event.payload);
-          this.echoResponseMessage = `Echo 回复: ${event.payload.content}`;
-          this.cdr.detectChanges();
-        });
-        console.log('[SatOnSiteMobile] 成功监听 "echo_response_event" 事件。');
-      } catch (error) {
-        console.error('[SatOnSiteMobile] 设置 "echo_response_event" 监听器失败:', error);
-        this.echoResponseMessage = '监听Echo事件失败';
+    // 订阅任务状态从服务
+    this.tauriListenerService.taskState$.subscribe(payload => {
+      if (payload && payload.new_state) {
+        this.taskStateString = JSON.stringify(payload.new_state, null, 2);
+      } else {
+        this.taskStateString = '收到的任务状态为空或无效';
       }
-    }
+      this.cdr.detectChanges();
+    });
+    
+    // 订阅Echo响应从服务
+    this.tauriListenerService.echoResponse$.subscribe(payload => {
+      if(payload && payload.content) {
+        this.echoResponseMessage = `Echo 回复: ${payload.content}`;
+      } else {
+        this.echoResponseMessage = '收到空的 Echo 回复';
+      }
+      this.cdr.detectChanges();
+    });
+
+    // 移除旧的直接监听逻辑
+    // if (!this.unlistenConnectionStatus) { ... }
+    // if (!this.unlistenRegistrationStatus) { ... }
+    // if (!this.unlistenPartnerStatus) { ... } // 这部分已被上面的订阅替代
+    // if (!this.unlistenTaskStateUpdate) { ... }
+    // if (!this.unlistenEcho) { ... }
   }
 
   ngOnDestroy(): void {
-    console.log('[SatOnSiteMobile] AppComponent ngOnDestroy');
-    if (this.unlistenConnectionStatus) {
-      this.unlistenConnectionStatus();
+    console.log('[现场移动端] AppComponent 组件 ngOnDestroy 生命周期钩子执行');
+    
+    // 取消伙伴状态的订阅
+    if (this.partnerStatusSubscription) {
+      this.partnerStatusSubscription.unsubscribe();
     }
-    if (this.unlistenRegistrationStatus) {
-      this.unlistenRegistrationStatus();
-    }
-    if (this.unlistenPartnerStatus) {
-      this.unlistenPartnerStatus();
-    }
-    if (this.unlistenTaskStateUpdate) {
-      this.unlistenTaskStateUpdate();
-    }
-    if (this.unlistenEcho) {
-      this.unlistenEcho();
-    }
+
+    // 组件销毁时清理 TauriListenerService 中的所有监听器
+    this.tauriListenerService.destroyListeners();
+    console.log('[现场移动端 AppComponent] 已通过服务销毁 Tauri 事件监听器');
+
+    // 移除旧的 unlisten 调用
+    // if (this.unlistenConnectionStatus) { this.unlistenConnectionStatus(); }
+    // if (this.unlistenRegistrationStatus) { this.unlistenRegistrationStatus(); }
+    // if (this.unlistenPartnerStatus) { this.unlistenPartnerStatus(); }
+    // if (this.unlistenTaskStateUpdate) { this.unlistenTaskStateUpdate(); }
+    // if (this.unlistenEcho) { this.unlistenEcho(); }
   }
 
+  /**
+   * @description 调用 Tauri 后端命令，请求连接到 WebSocket 云服务。
+   *              连接地址硬编码为 'ws://127.0.0.1:8088'。
+   */
   connectToCloud() {
-    console.log('[SatOnSiteMobile] 调用 Tauri 命令 connect_to_cloud');
+    console.log('[现场移动端] 调用 Tauri 命令: connect_to_cloud');
     const connectionUrl = 'ws://127.0.0.1:8088'; 
-    console.log(`[SatOnSiteMobile] 尝试连接到: ${connectionUrl}`);
+    console.log(`[现场移动端] 尝试连接到 WebSocket 服务地址: ${connectionUrl}`);
     invoke('connect_to_cloud', { url: connectionUrl })
       .then(() => {
-        console.log('[SatOnSiteMobile] connect_to_cloud 命令调用成功');
+        console.log('[现场移动端] connect_to_cloud 命令已成功发送至 Rust 后端');
       })
       .catch(error => {
-        console.error('[SatOnSiteMobile] connect_to_cloud 命令调用失败:', error);
-        this.connectionStatusMessage = `连接命令失败: ${error}`;
+        console.error('[现场移动端] connect_to_cloud 命令调用失败:', error);
+        this.connectionStatusMessage = `连接命令调用失败: ${error}`;
         this.cdr.detectChanges();
       });
   }
 
+  /**
+   * @description 调用 Tauri 后端命令，触发 WebSocket 客户端的重连逻辑（如果后端已实现）。
+   *              此函数目前主要用于演示，实际重连逻辑通常由客户端服务内部自动处理。
+   */
   triggerReconnect() {
-    console.log('[SatOnSiteMobile] 调用 Tauri 命令 trigger_reconnect (如果已实现)');
+    console.log('[现场移动端] 调用 Tauri 命令: trigger_reconnect (如果后端已实现此命令)');
     invoke('trigger_reconnect')
-      .then(() => console.log('[SatOnSiteMobile] trigger_reconnect 命令调用成功'))
-      .catch(error => console.error('[SatOnSiteMobile] trigger_reconnect 命令调用失败:', error));
+      .then(() => console.log('[现场移动端] trigger_reconnect 命令已成功发送至 Rust 后端'))
+      .catch(error => console.error('[现场移动端] trigger_reconnect 命令调用失败:', error));
   }
 
+  /**
+   * @description 调用 Tauri 后端命令，请求将此客户端注册到指定的任务组和任务。
+   *              需要用户在UI中输入 groupId 和 taskId。
+   */
   registerClient() {
     if (!this.groupId || !this.taskId) {
-      this.registrationStatusMessage = '请输入组ID和任务ID';
+      this.registrationStatusMessage = '请输入有效的组ID和任务ID才能注册。';
       this.cdr.detectChanges();
       return;
     }
-    this.registrationStatusMessage = '正在注册...';
+    this.registrationStatusMessage = '正在发送注册请求...';
     this.cdr.detectChanges();
 
-    console.log(`[SatOnSiteMobile] 调用 Tauri 命令 register_client_with_task, GroupID: ${this.groupId}, TaskID: ${this.taskId}`);
-    invoke('register_client_with_task', { groupId: this.groupId, taskId: this.taskId })
+    console.log(`[现场移动端] 调用 Tauri 命令: register_client_with_task, 组ID: ${this.groupId}, 任务ID: ${this.taskId}`);
+    invoke('register_client_with_task', {
+      group_id: this.groupId,
+      task_id: this.taskId
+    })
       .then(() => {
-        console.log('[SatOnSiteMobile] register_client_with_task 命令调用成功 (等待事件反馈)');
+        console.log('[现场移动端] register_client_with_task 命令已成功发送至 Rust 后端。');
       })
       .catch(error => {
-        console.error('[SatOnSiteMobile] register_client_with_task 命令调用失败:', error);
+        console.error('[现场移动端] register_client_with_task 命令调用失败:', error);
         this.registrationStatusMessage = `注册命令发送失败: ${error}`;
         this.cdr.detectChanges();
       });
   }
 
+  /**
+   * @description 调用 Tauri 后端命令，发送 Echo 消息到云服务。
+   *              Echo 内容从 UI 输入框获取。
+   */
   sendEcho() {
     if (!this.echoInput) {
-      this.echoResponseMessage = '请输入要发送的内容。';
+      this.echoResponseMessage = '请输入要发送的 Echo 内容。';
+      this.cdr.detectChanges();
       return;
     }
-    console.log(`[SatOnSiteMobile] 调用 Tauri 命令 send_ws_echo, 内容: "${this.echoInput}"`);
-    this.echoResponseMessage = 'Echo 已发送，等待回复...';
+    console.log(`[现场移动端] 调用 Tauri 命令: send_ws_echo, 发送内容: "${this.echoInput}"`);
+    this.echoResponseMessage = 'Echo 消息已发送，正在等待云端回复...';
     invoke('send_ws_echo', { content: this.echoInput })
       .then(() => {
-        console.log('[SatOnSiteMobile] send_ws_echo 命令调用成功');
+        console.log('[现场移动端] send_ws_echo 命令已成功发送至 Rust 后端');
       })
       .catch(error => {
-        console.error('[SatOnSiteMobile] send_ws_echo 命令调用失败:', error);
-        this.echoResponseMessage = `发送 Echo 失败: ${error}`;
+        console.error('[现场移动端] send_ws_echo 命令调用失败:', error);
+        this.echoResponseMessage = `发送 Echo 消息失败: ${error}`;
         this.cdr.detectChanges();
       });
   }

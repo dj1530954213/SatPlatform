@@ -478,6 +478,8 @@ impl WebSocketClientService {
                             // 注意：payload.partner_role 是 ClientRole 枚举，需要转换为字符串
                             partner_role: payload.partner_role.to_string(), 
                             is_online: payload.is_online,
+                            partner_client_id: Some(payload.partner_client_id.to_string()), // 新增：从云端 payload 获取
+                            group_id: Some(payload.group_id.clone()),                     // 新增：从云端 payload 获取
                         };
                         // **确保 WS_PARTNER_STATUS_EVENT 常量定义正确**
                         if let Err(e) = app_handle.emit_to("main", WS_PARTNER_STATUS_EVENT, &event_payload) {

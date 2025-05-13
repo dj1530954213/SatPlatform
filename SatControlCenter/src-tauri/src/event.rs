@@ -139,6 +139,12 @@ pub struct WsPartnerStatusEventPayload {
     pub partner_role: String,
     /// 指示伙伴是否在线 (true 表示上线/加入组，false 表示下线/离开组)。
     pub is_online: bool,
+    /// 发生状态变化的伙伴的客户端 ID (UUID 字符串)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partner_client_id: Option<String>,
+    /// 相关的组 ID。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 pub const WS_PARTNER_STATUS_EVENT: &str = "ws_partner_status";
