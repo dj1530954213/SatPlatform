@@ -20,7 +20,7 @@ pub mod general_cmds;
 
 /// 任务相关操作命令模块 (项目阶段 P7.4.x 引入)。
 /// 例如：获取任务列表、选择当前任务等（如果不由WebSocket直接管理）。
-pub mod task_cmds; 
+pub mod task_commands;
 
 /// 数据管理与同步相关命令模块 (项目阶段 P5.2.1, P8.1.3 引入)。
 /// 例如：手动触发数据上传、下载配置等。
@@ -42,6 +42,8 @@ pub mod mobile_cmds;
 // 或者，在 `main.rs` 的 `generate_handler!` 中分别列出每个模块的命令：
 // `tauri::generate_handler![general_cmds::my_cmd, task_cmds::another_cmd]`
 pub use general_cmds::*; 
+
+pub use task_commands::*;
 
 // 提示：如果 `SatOnSiteMobile` 应用未来引入更多类别的命令，
 // 请在此处添加相应的 `pub mod` 声明，并在需要时调整导出策略。

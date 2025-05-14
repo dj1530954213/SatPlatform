@@ -4,6 +4,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { TauriListenerService, PartnerInfo } from './core/services/tauri-listener.service'; // 确保路径正确
 import { CommonModule } from '@angular/common'; // 引入 CommonModule
+import { RouterOutlet } from '@angular/router';
+import { WebsocketManagerComponent } from './features/websocket-manager/websocket-manager.component';
+import { ClientTaskStateDisplayComponent } from './features/client-task-state-display/client-task-state-display.component';
+import { DebugSenderComponent } from './features/debug-tools/debug-sender/debug-sender.component';
 
 // WebSocket 连接状态事件的 Payload (与 Rust 端 WsConnectionStatusEventPayload 对应)
 interface WsConnectionStatusEventPayload {
@@ -66,9 +70,16 @@ interface LocalTaskStateUpdatedEventPayload {
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [FormsModule, CommonModule], // 添加 CommonModule 到 imports
+  imports: [
+    CommonModule,       // Import for common directives
+    FormsModule,        // Import for template-driven forms
+    RouterOutlet,
+    WebsocketManagerComponent, 
+    ClientTaskStateDisplayComponent,
+    DebugSenderComponent 
+  ],
   templateUrl: './app.component.html',
-  styleUrls: ['./app.component.css']
+  styleUrls: ['./app.component.scss'] // Assuming scss, adjust if css
 })
 export class AppComponent implements OnInit, OnDestroy {
   // private unlistenConnectionStatus?: UnlistenFn; // 由 TauriListenerService 处理

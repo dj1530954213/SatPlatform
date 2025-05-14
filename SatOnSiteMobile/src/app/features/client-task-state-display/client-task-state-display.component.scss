@@ -1,0 +1,34 @@
+/* Styles for ClientTaskStateDisplayComponent */
+div {
+  padding: 10px;
+  border: 1px solid #eee;
+  background-color: #f9f9f9;
+  margin-bottom: 10px;
+}
+
+h3 {
+  margin-top: 0;
+  color: #333;
+}
+
+p {
+  margin-bottom: 5px;
+}
+
+strong {
+  color: #555;
+}
+
+pre {
+  background-color: #fff;
+  border: 1px solid #ddd;
+  padding: 8px;
+  font-size: 0.9em;
+  white-space: pre-wrap; /* Ensures long lines wrap */
+  word-wrap: break-word; /* Ensures long words break */
+}
+
+.noState {
+  color: #888;
+  font-style: italic;
+} 

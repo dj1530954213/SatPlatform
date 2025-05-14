@@ -44,6 +44,18 @@ pub const CONFIRM_SINGLE_TEST_STEP_TYPE: &str = "ConfirmSingleTestStep";
 /// 作为 payload 发送给同一任务组内的其他伙伴客户端。
 pub const TASK_STATE_UPDATE_MESSAGE_TYPE: &str = "TaskStateUpdate";
 
+// --- 新增的业务消息类型和Payload --- (P4.2.1 场景二)
+pub const UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE: &str = "UpdateTaskDebugNoteCommand";
+
+/// 用于客户端（例如中心端）请求更新任务的通用调试备注。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UpdateTaskDebugNotePayload {
+    /// 目标调试组的ID。
+    pub group_id: String,
+    /// 新的调试备注内容。
+    pub new_note: String,
+}
+
 /// 业务操作Payload的枚举。
 ///
 /// 此枚举封装了所有由客户端发起、旨在改变或查询任务调试状态的业务消息的Payload。
@@ -55,6 +67,7 @@ pub enum BusinessActionPayload {
     StartSingleTestStep(crate::task_models::StartSingleTestStepPayload),
     FeedbackSingleTestStep(crate::task_models::FeedbackSingleTestStepPayload),
     ConfirmSingleTestStep(crate::task_models::ConfirmSingleTestStepPayload),
+    UpdateTaskDebugNote(UpdateTaskDebugNotePayload),
     // 未来可以添加更多的业务操作类型
     // Example: UpdateInterlockCondition(crate::task_models::UpdateInterlockConditionPayload),
 }

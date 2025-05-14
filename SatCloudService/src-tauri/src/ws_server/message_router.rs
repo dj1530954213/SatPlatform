@@ -36,6 +36,7 @@ use common_models::ws_payloads::{ // 从共享模型库引入 WebSocket 消息�
     RegisterResponsePayload, // 用于服务端对客户端注册/加入组请求的响应的负载结构体定义 (P3.1.2 新增)。
     // 提醒 (P3.3.2): 未来与具体业务逻辑相关的负载类型 (例如 UpdatePreCheckItemPayload, StartSingleTestStepPayload 等)
     // 也应在此处或相应的业务模型模块中定义，并可能需要在此 MessageRouter 中添加处理分支。
+    UpdateTaskDebugNotePayload, // P4.2.1 新增：用于更新任务调试备注的负载
     // ECHO_MESSAGE_TYPE, PING_MESSAGE_TYPE, REGISTER_MESSAGE_TYPE, // 移除这些具名导入
     // ERROR_RESPONSE_MESSAGE_TYPE, // 移除这个具名导入
     // PONG_MESSAGE_TYPE, REGISTER_RESPONSE_MESSAGE_TYPE, PARTNER_STATUS_UPDATE_MESSAGE_TYPE, // 其他可能用到的
@@ -563,6 +564,40 @@ pub async fn handle_message(
                 }
                 Err(e) => {
                     send_payload_parse_error(&client_session, ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE, &e.to_string(), &message.payload).await;
+                }
+            }
+        }
+
+        // 分支 P4.2.1: 处理 "UpdateTaskDebugNoteCommand" (更新任务调试备注) 类型的消息
+        ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE => {
+            info!(
+                "[消息路由] 客户端 {} (地址: {}): 正在处理 {} 请求。",
+                client_session.client_id, client_session.addr, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE
+            );
+            let (group_id_clone, client_role_clone) = 
+                if let (Some(gid), role) = (client_session.group_id.read().await.as_ref(), *client_session.role.read().await) {
+                    if role != common_models::enums::ClientRole::Unknown { (gid.clone(), role) } else { send_unregistered_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE).await; return Ok(()); }
+                } else { send_unregistered_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE).await; return Ok(()); };
+
+            match serde_json::from_str::<common_models::ws_payloads::UpdateTaskDebugNotePayload>(&message.payload) {
+                Ok(parsed_payload) => {
+                    debug!(
+                        "[消息路由] 客户端 {}: UpdateTaskDebugNotePayload 解析成功: {:?}",
+                        client_session.client_id, parsed_payload
+                    );
+                    let action_payload = common_models::ws_payloads::BusinessActionPayload::UpdateTaskDebugNote(parsed_payload);
+                    process_business_action_and_notify_partners(
+                        &client_session,
+                        &group_id_clone,
+                        client_role_clone,
+                        action_payload,
+                        &task_state_manager,
+                        &connection_manager,
+                        ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE
+                    ).await;
+                }
+                Err(e) => {
+                    send_payload_parse_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, &e.to_string(), &message.payload).await;
                 }
             }
         }

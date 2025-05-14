@@ -1,0 +1,21 @@
+<div class="debug-sender-container">
+  <h3>Send Debug Note (OnSiteMobile Test)</h3>
+  <div class="form-group">
+    <label for="groupIdInput">Group ID:</label>
+    <input id="groupIdInput" type="text" [(ngModel)]="groupId" placeholder="e.g., test_group_01">
+  </div>
+  <div class="form-group">
+    <label for="debugNoteInput">Debug Note:</label>
+    <textarea id="debugNoteInput" rows="3" [(ngModel)]="debugNote" placeholder="Enter debug note here"></textarea>
+  </div>
+  <button (click)="sendNote()" [disabled]="isLoading">
+    <span *ngIf="isLoading">Sending...</span>
+    <span *ngIf="!isLoading">Send Note to Cloud</span>
+  </button>
+  
+  <div *ngIf="apiResponse" class="response-message"
+       [ngClass]="{'success': apiResponse.success, 'error': !apiResponse.success}">
+    <p><strong>Status:</strong> {{ apiResponse.success ? 'Success' : 'Failed' }}</p>
+    <p><strong>Message:</strong> {{ apiResponse.message }}</p>
+  </div>
+</div> 

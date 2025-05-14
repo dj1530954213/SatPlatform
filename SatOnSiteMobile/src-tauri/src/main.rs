@@ -63,9 +63,14 @@ fn main() {
             commands::general_cmds::check_ws_connection_status, // 检查当前 WebSocket 连接状态
             commands::general_cmds::send_ws_echo,             // 发送 Echo 消息到云端
             commands::general_cmds::register_client_with_task, // 注册客户端到任务组
-            // TODO: 在此根据 SatOnSiteMobile 的具体业务需求，添加更多 Tauri 命令。
-            // 例如：commands::pre_check_cmds::update_pre_check_item,
-            //       commands::single_test_cmds::send_test_feedback,
+            commands::dev_tools_cmds::open_dev_tools,
+            commands::app_lifecycle_cmds::on_window_ready,
+            commands::network_cmds::check_server_connectivity_cmd,
+            commands::ws_cmds::connect_to_ws_server_cmd,
+            commands::ws_cmds::disconnect_from_ws_server_cmd,
+            commands::ws_cmds::send_echo_message_cmd,
+            commands::ws_cmds::send_register_message_cmd,
+            commands::send_debug_note_from_site_cmd
         ])
         .build(tauri::generate_context!()) // 根据 tauri.conf.json 和 Cargo.toml 生成上下文
         .expect("构建 Tauri 应用核心失败 (SatOnSiteMobile)，请检查配置。")

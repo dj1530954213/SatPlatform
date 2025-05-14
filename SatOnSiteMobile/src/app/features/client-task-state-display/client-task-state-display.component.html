@@ -1,0 +1,13 @@
+<div *ngIf="taskState$ | async as state">
+  <h3>Client Task State</h3>
+  <div *ngIf="state; else noState">
+    <p><strong>Group ID:</strong> {{ state.group_id || 'N/A' }}</p>
+    <p><strong>Task ID:</strong> {{ state.task_id || 'N/A' }}</p>
+    <p><strong>Debug Notes:</strong> {{ state.general_debug_notes || 'No notes available.' }}</p>
+    <!-- 在此可以添加更多 TaskDebugState 字段的显示 -->
+    <pre>{{ state | json }}</pre> <!-- 临时：显示整个状态对象，便于调试 -->
+  </div>
+  <ng-template #noState>
+    <p>No task state data available.</p>
+  </ng-template>
+</div> 
