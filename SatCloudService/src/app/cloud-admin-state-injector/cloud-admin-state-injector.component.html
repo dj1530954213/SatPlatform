@@ -1,0 +1,38 @@
+<div nz-row nzJustify="center" class="container">
+  <div nz-col nzXs="24" nzSm="20" nzMd="16" nzLg="12" nzXl="10">
+    <h2>云端管理：任务状态注入工具</h2>
+    <p>使用此表单模拟云端直接向特定调试组推送 <code>TaskDebugState</code> 更新。</p>
+    <form nz-form [formGroup]="stateForm" (ngSubmit)="submitForm()">
+      <nz-form-item>
+        <nz-form-label [nzSm]="8" [nzXs]="24" nzFor="groupId" nzRequired>调试组ID (Group ID)</nz-form-label>
+        <nz-form-control [nzSm]="16" [nzXs]="24" nzErrorTip="请输入调试组ID！">
+          <input nz-input formControlName="groupId" id="groupId" placeholder="例如：group_alpha" />
+        </nz-form-control>
+      </nz-form-item>
+
+      <nz-form-item>
+        <nz-form-label [nzSm]="8" [nzXs]="24" nzFor="generalDebugNotes">通用调试备注</nz-form-label>
+        <nz-form-control [nzSm]="16" [nzXs]="24">
+          <textarea nz-input formControlName="generalDebugNotes" id="generalDebugNotes" [nzAutosize]="{ minRows: 2, maxRows: 6 }" placeholder="例如：云端主动推送：系统状态GREEN"></textarea>
+        </nz-form-control>
+      </nz-form-item>
+
+      <nz-form-item>
+        <nz-form-label [nzSm]="8" [nzXs]="24" nzFor="customSharedDataJson">自定义共享数据 (JSON)</nz-form-label>
+        <nz-form-control [nzSm]="16" [nzXs]="24" [nzErrorTip]="errorTpl">
+          <textarea nz-input formControlName="customSharedDataJson" id="customSharedDataJson" [nzAutosize]="{ minRows: 3, maxRows: 8 }" [placeholder]="jsonPlaceholder"></textarea>
+          <ng-template #errorTpl let-control>
+            <ng-container *ngIf="control.hasError('jsonInvalid')">请输入有效的JSON格式。</ng-container>
+            <ng-container *ngIf="control.hasError('required') && control.dirty">此项为必填项。</ng-container>
+          </ng-template>
+        </nz-form-control>
+      </nz-form-item>
+
+      <nz-form-item nz-row class="register-area">
+        <nz-form-control [nzSpan]="16" [nzOffset]="8">
+          <button nz-button nzType="primary" [disabled]="stateForm.invalid">发送状态更新 (模拟云端推送)</button>
+        </nz-form-control>
+      </nz-form-item>
+    </form>
+  </div>
+</div> 

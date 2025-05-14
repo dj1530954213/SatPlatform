@@ -9,6 +9,8 @@ use sat_cloud_service::ws_server::task_state_manager::TaskStateManager; // P3.1.
 use sat_cloud_service::ws_server::heartbeat_monitor::HeartbeatMonitor; // P3.2.1: 引入心跳监视器，用于检测和处理客户端超时
 use std::sync::Arc; // 引入原子引用计数 Arc，用于在多线程环境安全地共享状态所有权
 use std::time::Duration; // P3.2.1: 引入时间间隔 Duration，用于定义超时和检查周期
+use serde_json::Value as JsonValue; // 添加 JsonValue 支持
+use tauri::State; // 添加 State 支持
 
 // 此配置用于在 Windows 平台的发布 (release) 构建中阻止显示一个额外的控制台窗口。
 // 请勿移除此行，这对于提升 Windows 用户体验很重要！
@@ -25,6 +27,69 @@ fn greet(name: &str) -> String {
     // 使用 format! 宏构建一个包含问候信息的字符串
     // 例如，如果 name 是 "World"，则返回 "你好, World! 来自 Rust 的问候!"
     format!("你好, {}! 来自 Rust 的问候!", name)
+}
+
+#[tauri::command]
+async fn admin_broadcast_task_state_update_cmd(
+    group_id: String,
+    debug_notes: Option<String>,
+    custom_data_json: Option<String>,
+    task_state_manager: State<'_, Arc<TaskStateManager>>,
+    connection_manager: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    info!(
+        "Tauri command 'admin_broadcast_task_state_update_cmd' called with groupId: {}, notes: {:?}, custom_json: {:?}",
+        group_id, debug_notes, custom_data_json
+    );
+
+    // 使用公共方法 get_task_state 获取状态
+    let task_state_arc = match task_state_manager.get_task_state(&group_id).await {
+        Some(state_arc) => state_arc,
+        None => {
+            let err_msg = format!("[Admin CMD] TaskDebugState for group_id '{}' not found.", group_id);
+            error!("{}", err_msg);
+            return Err(err_msg);
+        }
+    };
+
+    { // Scope for write guard
+        let mut task_state_guard = task_state_arc.write().await;
+
+        task_state_guard.general_debug_notes = debug_notes;
+
+        if let Some(json_str) = custom_data_json {
+            match serde_json::from_str::<JsonValue>(&json_str) {
+                Ok(json_val) => task_state_guard.custom_shared_data = Some(json_val),
+                Err(e) => {
+                    let err_msg = format!("[Admin CMD] Invalid custom_data_json format: {}", e);
+                    error!("{}", err_msg);
+                    return Err(err_msg);
+                }
+            }
+        } else {
+            task_state_guard.custom_shared_data = None;
+        }
+        
+        task_state_guard.last_update_timestamp = chrono::Utc::now();
+        // Placeholder: Consider setting a specific role for admin-initiated updates
+        // if task_state_guard.last_updated_by_role.is_some() {
+        //     task_state_guard.last_updated_by_role = Some(common_models::enums::ClientRole::Admin); // Requires common_models
+        // }
+
+        info!("[Admin CMD] TaskDebugState for group_id '{}' updated: {:?}", group_id, *task_state_guard);
+
+        // 移除对私有广播方法的直接调用。
+        // 后续将通过 TaskStateManager 的公共接口触发广播。
+        // task_state_manager.priv_broadcast_task_state(&group_id, &*task_state_guard, &connection_manager).await;
+    }
+    
+    // 在状态更新后，调用新的公共广播方法
+    // 注意：这里需要传递 Arc<ConnectionManager> 而不是 State<'_, Arc<ConnectionManager>>
+    // 因此，我们需要从 State 中提取 Arc<ConnectionManager>
+    let conn_manager_arc = connection_manager.inner().clone();
+    task_state_manager.force_broadcast_state(&group_id, &conn_manager_arc).await;
+
+    Ok(())
 }
 
 // 声明应用配置模块，该模块负责加载和管理应用的配置信息
@@ -123,7 +188,7 @@ fn main() {
             info!("[主程序::Setup钩子] Tauri 应用的所有初始化设置已全部完成。");
             Ok(()) // 表示 setup 钩子成功完成
         })
-        .invoke_handler(tauri::generate_handler![greet]) // 注册 Tauri 命令处理器，使得 `greet` 命令可以从前端调用
-        .run(tauri::generate_context!()) // 启动并运行 Tauri 应用，传入通过宏在编译时生成的应用上下文信息
-        .expect("[主程序] 致命错误：运行 Tauri 应用时发生不可恢复的问题，应用无法启动。"); // 如果 run 方法返回错误，程序将 panic 并显示此消息
-}
+        .invoke_handler(tauri::generate_handler![greet, admin_broadcast_task_state_update_cmd]) // 注册 Tauri 命令处理器
+        .run(tauri::generate_context!()) // 运行 Tauri 应用
+        .expect("启动 Tauri 应用程序时发生严重错误，请检查日志！"); // 处理启动错误
+} // 关闭 main 函数

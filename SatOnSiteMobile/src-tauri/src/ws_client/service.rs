@@ -501,6 +501,8 @@ impl WebSocketClientService {
                          new_state.last_updated_by_role,
                          new_state.last_update_timestamp
                      );
+                     info!("[现场端移动服务] (处理消息) 收到的完整 TaskDebugState: {:?}", new_state);
+
                      // 更新本地缓存中的任务状态
                      *local_task_state_cache_clone.write().await = Some(new_state.clone()); // 克隆 new_state 以存入缓存
                      info!("[现场端移动服务] (处理消息) 本地任务状态缓存已更新为来自云端的最新状态 (任务ID: {}).", new_state.task_id);

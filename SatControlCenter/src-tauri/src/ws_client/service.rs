@@ -482,17 +482,20 @@ impl WebSocketClientService {
             }
             TASK_STATE_UPDATE_MESSAGE_TYPE => {
                 match serde_json::from_str::<TaskDebugState>(&ws_msg.payload) {
-                    Ok(task_state) => {
+                    Ok(new_state) => {
                         info!(
-                            "[SatControlCenter] 收到 TaskStateUpdate for task_id: {}, last_updated by {:?} at {:?}",
-                            task_state.task_id,
-                            task_state.last_updated_by_role,
-                            task_state.last_update_timestamp
+                            "[中心端服务] (处理消息) 成功解析类型为 '{}' 的任务状态更新: 任务ID='{}', 最后更新者='{:?}', 时间戳={}",
+                            TASK_STATE_UPDATE_MESSAGE_TYPE,
+                            new_state.task_id,
+                            new_state.last_updated_by_role,
+                            new_state.last_update_timestamp
                         );
-                        *local_task_state_cache_clone.write().await = Some(task_state.clone());
+                        info!("[中心端服务] (处理消息) 收到的完整 TaskDebugState: {:?}", new_state);
+
+                        *local_task_state_cache_clone.write().await = Some(new_state.clone());
                         
                         let event_payload = LocalTaskStateUpdatedEventPayload {
-                            new_state: task_state,
+                            new_state: new_state,
                         };
                         if let Err(e) = app_handle.emit(LOCAL_TASK_STATE_UPDATED_EVENT, &event_payload) {
                             error!(

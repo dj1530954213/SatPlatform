@@ -75,6 +75,12 @@ pub struct TaskDebugState {
     /// 最后更新的时间戳 (Unix epoch milliseconds)。
     pub last_update_timestamp: DateTime<Utc>,
     pub version: u64, // 用于乐观锁或版本跟踪
+
+    // 新增字段以匹配 admin_broadcast_task_state_update_cmd 命令的期望
+    /// 通用的调试备注，可由管理员或特定流程设置。
+    pub general_debug_notes: Option<String>,
+    /// 自定义的共享JSON数据，可由管理员或特定流程注入，用于灵活的状态扩展。
+    pub custom_shared_data: Option<serde_json::Value>,
 }
 
 impl TaskDebugState {
@@ -90,6 +96,9 @@ impl TaskDebugState {
             last_updated_by_role: None,
             last_update_timestamp: Utc::now(),
             version: 0,
+            // 初始化新增字段
+            general_debug_notes: None,
+            custom_shared_data: None,
         }
     }
 }

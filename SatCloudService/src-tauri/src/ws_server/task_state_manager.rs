@@ -26,7 +26,7 @@
 //! - **状态清理**: 当一个调试任务正常结束，或其相关的客户端组被解散 (例如，所有客户端都已断开连接) 时，
 //!   本管理器需要负责从其内部存储中移除对应的任务状态，以释放占用的系统资源。
 
-use log::{info, warn}; // 移除了未使用的 'debug' 和 'error'
+use log::{info, warn, error}; // 移除了未使用的 'debug' 和 'error'
 use std::sync::Arc; // `Arc` (原子引用计数) 将用于安全地共享 TaskStateManager 实例以及单个 TaskDebugState 实例的所有权。
 use dashmap::DashMap; // `DashMap` 是一个高性能的并发哈希映射库，计划用于存储 `group_id` 到 `TaskDebugState` 的映射。
 use tokio::sync::RwLock; // Tokio 提供的异步读写锁 (`RwLock`)，将用于保护对单个 `TaskDebugState` 实例内部数据的并发读写访问，确保数据一致性。
@@ -35,7 +35,8 @@ use common_models::enums::ClientRole; // 从 `common_models` (公共模型) crat
 use common_models::ws_payloads::BusinessActionPayload; // 引入业务Action Payload
 use common_models::task_models::PreCheckItemStatus; // Keep PreCheckItemStatus
 use chrono::Utc; // 引入Utc以获取当前时间
-// use serde_json; // serde_json is unused
+use serde_json; // serde_json is used
+use uuid; // uuid is used
 
 /// `TaskStateManager` (任务状态管理器) 结构体的定义 (当前为P3.1.2阶段的骨架实现)。
 /// 
@@ -280,6 +281,83 @@ impl TaskStateManager {
                 None
             }
         }
+    }
+
+    /// 强制广播指定组的当前任务状态。
+    /// 此方法主要用于特殊情况，例如由Tauri命令直接触发的状态更新后的广播。
+    pub async fn force_broadcast_state(
+        &self,
+        group_id: &str,
+        conn_manager: &Arc<super::connection_manager::ConnectionManager>, // 接收 Arc<ConnectionManager> 的引用
+    ) {
+        info!("[任务状态管理器] 尝试为组 '{}' 强制广播 TaskDebugState...", group_id);
+        match self.get_task_state(group_id).await {
+            Some(task_state_arc) => {
+                let task_state_guard = task_state_arc.read().await; // 获取读锁
+                // 注意：这里传递的是 task_state_guard 的引用，priv_broadcast_task_state 期望 &TaskDebugState
+                self.priv_broadcast_task_state(group_id, &*task_state_guard, conn_manager).await;
+            }
+            None => {
+                warn!(
+                    "[任务状态管理器] 尝试为组 '{}' 强制广播状态失败：未找到该组的任务状态。",
+                    group_id
+                );
+            }
+        }
+    }
+
+    /// （P3.3.2 规划）私有辅助方法：将指定的 TaskDebugState 广播给指定组内的所有客户端。
+    /// 此方法应由 TaskStateManager 内部在状态发生显著变化后调用。
+    async fn priv_broadcast_task_state(
+        &self,
+        group_id: &str,
+        task_state: &TaskDebugState,
+        conn_manager: &super::connection_manager::ConnectionManager, 
+    ) {
+        info!("[任务状态管理器] 准备为组 '{}' 广播 TaskDebugState 更新...", group_id);
+        let clients_in_group = conn_manager.get_group_members_for_broadcast(group_id, None).await;
+
+        if clients_in_group.is_empty() {
+            warn!("[任务状态管理器] 组 '{}' 中没有活动的客户端，取消广播 TaskDebugState。", group_id);
+            return;
+        }
+
+        let serialized_state_payload = match serde_json::to_string(task_state) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(
+                    "[任务状态管理器] 序列化 TaskDebugState (group_id: '{}') 以进行广播时失败: {:?}",
+                    group_id, e
+                );
+                return;
+            }
+        };
+
+        let common_ws_msg = common_models::WsMessage { 
+            message_id: uuid::Uuid::new_v4().to_string(), 
+            message_type: common_models::ws_payloads::TASK_STATE_UPDATE_MESSAGE_TYPE.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),    
+            payload: serialized_state_payload, 
+        };
+        info!("[任务状态管理器] 成功序列化 TaskDebugState (group_id: '{}')，准备向 {} 个客户端广播。", group_id, clients_in_group.len());
+
+        // 将 common_models::WsMessage 转换为 rust_websocket_utils::message::WsMessage
+        let ws_msg_to_send = rust_websocket_utils::message::WsMessage {
+            message_id: common_ws_msg.message_id.clone(),
+            message_type: common_ws_msg.message_type.clone(),
+            payload: common_ws_msg.payload.clone(),
+            timestamp: common_ws_msg.timestamp,
+        };
+
+        for client_session_arc in clients_in_group {
+            if let Err(e) = client_session_arc.sender.send(ws_msg_to_send.clone()).await { // 发送转换后的消息
+                error!(
+                    "[任务状态管理器] 向客户端 {} (组 '{}') 广播 TaskStateUpdate 失败: {:?}",
+                    client_session_arc.client_id, group_id, e
+                );
+            }
+        }
+        info!("[任务状态管理器] 已完成向组 '{}' 的客户端广播 TaskDebugState。", group_id);
     }
 }
 
