@@ -237,6 +237,7 @@ pub async fn send_ws_echo(
 /// * `app_handle`: Tauri 应用句柄，用于访问状态管理器。
 /// * `group_id`: 用户或系统指定的调试会话组的唯一标识符。
 /// * `task_id`: 当前客户端希望关联和操作的调试任务的唯一标识符。
+/// * `client_display_name`: 客户端显示名称，可选参数
 ///
 /// # 返回
 /// * `Result<(), String>`:
@@ -249,34 +250,33 @@ pub async fn register_client_with_task(
     app_handle: tauri::AppHandle, // 使用 AppHandle 获取状态
     group_id: String,
     task_id: String,
+    client_display_name: Option<String>, // 新增参数
 ) -> Result<(), String> {
     info!(
-        "[中心端通用命令] 'register_client_with_task' 被调用。组ID: '{}', 任务ID: '{}'",
-        group_id, task_id
+        "[中心端通用命令] 'register_client_with_task' 被调用。组ID: '{}', 任务ID: '{}', 显示名称: {:?}",
+        group_id, task_id, client_display_name
     );
 
-    // 1. 从 Tauri 状态管理器获取 WebSocketClientService 实例
-    // 使用 app_handle.state() 方法获取，因为这是在非State参数的函数中访问状态的标准方式
+    // 1. 从 Tauri 状态管理器中获取 WebSocketClientService 实例
+    // 使用 app_handle.state() 来获取服务实例
     let ws_service_state = app_handle.state::<Arc<WebSocketClientService>>();
     let ws_service = ws_service_state.inner().clone(); // 克隆 Arc<WebSocketClientService>
 
-    // 2. 确定客户端角色
-    // 对于 SatControlCenter (中心端)，角色固定为 ControlCenter
+    // 2. 确定 ClientRole (对于中心端，总是 ControlCenter)
     let client_role = ClientRole::ControlCenter;
-    info!("[中心端通用命令] 当前客户端角色设定为: {:?}", client_role);
+    let client_sw_version = Some(env!("CARGO_PKG_VERSION").to_string());
 
     // 3. 构建 RegisterPayload
     let register_payload = RegisterPayload {
-        group_id: group_id.clone(),
+        group_id: group_id.clone(), // 克隆以所有权传递
         role: client_role,
-        task_id: task_id.clone(),
-        // client_identifier: None, // client_identifier 通常由前端在需要时生成并传入，或由后端基于连接信息生成
-        // device_capabilities: None, // 设备能力描述，如果适用
-        // client_version: Some(env!("CARGO_PKG_VERSION").to_string()), // 可以考虑添加客户端版本
+        task_id: task_id.clone(), // 克隆以所有权传递
+        client_software_version: client_sw_version, // 新增字段
+        client_display_name: client_display_name,   // 新增字段
     };
-    info!("[中心端通用命令] 构建的 RegisterPayload: {:?}", register_payload);
 
-    // 4. 构建 WsMessage (类型为 REGISTER_MESSAGE_TYPE)
+    // 4. 构建 WsMessage
+    // 使用 WsMessage::new 辅助函数
     let ws_message = match WsMessage::new(REGISTER_MESSAGE_TYPE.to_string(), &register_payload) {
         Ok(msg) => msg,
         Err(e) => {
@@ -285,9 +285,8 @@ pub async fn register_client_with_task(
             return Err(err_msg);
         }
     };
-    info!("[中心端通用命令] 构建的 WsMessage (Register): 消息ID='{}'", ws_message.message_id);
 
-    // 5. 发送注册消息
+    // 5. 发送消息
     match ws_service.send_ws_message(ws_message).await {
         Ok(_) => {
             info!(
@@ -298,10 +297,10 @@ pub async fn register_client_with_task(
         }
         Err(e) => {
             error!(
-                "[中心端通用命令] 'register_client_with_task': 发送注册消息时遇到错误: {}",
-                e
+                "[中心端通用命令] 'register_client_with_task': 发送注册消息 (组ID: '{}', 任务ID: '{}') 时遇到错误: {}",
+                group_id, task_id, e
             );
-            Err(e) // 直接返回从服务层获取的错误信息 (已经是 String 类型)
+            Err(e) // 直接返回从服务层获取的错误信息
         }
     }
 }

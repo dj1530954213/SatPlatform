@@ -56,60 +56,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Removed greet, get_system_info, frontend_ready as they are not defined in general_cmds.rs
-            // Removed execute_task_command, get_task_state as task_cmds.rs is a placeholder
-            // Removed get_cloud_connection_state, get_cloud_assigned_client_id, 
-            // get_latest_cloud_error_message, clear_latest_cloud_error_message as they are not defined in general_cmds.rs
-            
-            // Keeping commands that are confirmed to exist in general_cmds.rs
+            // 与现场端对齐，并使用中心端 task_commands 中的命令名
             commands::general_cmds::connect_to_cloud,
             commands::general_cmds::disconnect_from_cloud,
             commands::general_cmds::check_ws_connection_status,
             commands::general_cmds::send_ws_echo,
-            commands::general_cmds::register_client_with_task
+            commands::general_cmds::register_client_with_task,
+            commands::dev_tools_cmds::open_dev_tools,
+            commands::app_lifecycle_cmds::on_window_ready,
+            commands::network_cmds::check_server_connectivity_cmd,
+            commands::ws_cmds::connect_to_ws_server_cmd,
+            commands::ws_cmds::disconnect_from_ws_server_cmd,
+            commands::ws_cmds::send_echo_message_cmd,
+            commands::ws_cmds::send_register_message_cmd,
+            commands::task_cmds::update_task_debug_note_cmd // 中心端 task_commands 中的对应命令
         ])
-        .on_window_event(|window, event_type| match event_type {
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                // 阻止窗口默认关闭行为
-                // api.prevent_close();
-                info!("CloseRequested event received for window: {}", window.label());
-                // let window_clone = window.clone(); // Need to clone window for use in confirm dialog closure
-                // // Show a confirmation dialog
-                // tauri::api::dialog::confirm(
-                //     Some(&window_clone),
-                //     "Confirm Exit",
-                //     "Are you sure you want to close SatControlCenter?",
-                //     move |response| {
-                //         if response {
-                //             info!("User confirmed exit. Closing window.");
-                //             // If user confirms, then close the window
-                //             // window_clone.close().expect("Failed to close window");
-                //             std::process::exit(0); // Exit the entire application
-                //         } else {
-                //             info!("User cancelled exit.");
-                //         }
-                //     },
-                // );
-            }
-            _ => {}
-        })
-        .build(tauri::generate_context!()) // Ensure this is correctly placed
+        .build(tauri::generate_context!()) 
         .expect("error while building tauri application");
 
-    // Setup application event listeners
-    // setup_event_listeners(app.handle()); // Temporarily commented out
-    let app_handle = app.handle().clone();
-    // tauri::async_runtime::spawn(async move {
-    //     setup_event_listeners(&app_handle).await; // Temporarily commented out
-    // });
-
     app.run(|_app_handle, event| match event {
-        tauri::RunEvent::ExitRequested { .. } => { // Removed api as it's unused
-            info!("ExitRequested run event received. Application will terminate.");
-            // Perform any cleanup before exiting if necessary
+        tauri::RunEvent::ExitRequested { .. } => { 
+            info!("[SatControlCenter] ExitRequested run event received. Application will terminate.");
+            // 与现场端对齐，直接退出
+            std::process::exit(0);
         }
         tauri::RunEvent::Ready => {
-            info!("Application is ready.");
+            info!("[SatControlCenter] Application is ready.");
         }
         _ => {}
     });

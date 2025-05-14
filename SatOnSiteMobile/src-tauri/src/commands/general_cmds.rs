@@ -236,6 +236,7 @@ pub async fn send_ws_echo(
 /// * `app_handle`: Tauri 应用句柄，用于获取共享的 `WebSocketClientService` 状态。
 /// * `group_id`: 字符串，客户端希望加入或创建的调试组的唯一标识符。
 /// * `task_id`: 字符串，与此调试会话关联的具体任务的唯一标识符。
+/// * `client_display_name_param`: 可选字符串，客户端显示名称。
 ///
 /// # 返回
 /// * `Result<(), String>`: 
@@ -246,20 +247,23 @@ pub async fn register_client_with_task(
     app_handle: tauri::AppHandle, // 使用 AppHandle 获取状态
     group_id: String,
     task_id: String,
+    client_display_name_param: Option<String>, // 从前端接收 display_name，重命名以区分
 ) -> Result<(), String> {
     info!(
-        "[现场端通用命令] 'register_client_with_task' 被调用, 组ID: {}, 任务ID: {}",
-        group_id, task_id
+        "[现场端通用命令] 'register_client_with_task' 被调用, 组ID: {}, 任务ID: {}, 显示名称: {:?}",
+        group_id, task_id, client_display_name_param // 使用重命名后的参数
     );
 
     // 1. 构建 RegisterPayload
     let register_payload = RegisterPayload {
-        group_id: group_id.clone(), // 克隆以保持所有权
-        role: ClientRole::OnSiteMobile, // 现场端角色
-        task_id: task_id.clone(),   // 克隆以保持所有权
+        group_id: group_id.clone(),
+        role: ClientRole::OnSiteMobile, // 现场端固定角色
+        task_id: task_id.clone(),
+        client_display_name: client_display_name_param.or_else(|| Some("OnSiteMobileClient".to_string())), // client_display_name_param 在此被消耗
+        client_software_version: Some(env!("CARGO_PKG_VERSION").to_string()), // 使用 crate 版本
     };
 
-    // 2. & 3. 构建 WsMessage (使用 WsMessage::new 辅助函数)
+    // 2. 序列化 RegisterPayload 为 JSON (已由 WsMessage::new 处理)
     let ws_message = match WsMessage::new(REGISTER_MESSAGE_TYPE.to_string(), &register_payload) {
         Ok(msg) => msg,
         Err(e) => {
@@ -268,21 +272,6 @@ pub async fn register_client_with_task(
             return Err(err_msg);
         }
     };
-
-    // 旧的序列化和 WsMessage 构建方式，已被 WsMessage::new 替代
-    // let serialized_payload = match serde_json::to_string(&register_payload) {
-    //     Ok(json_str) => json_str,
-    //     Err(e) => {
-    //         error!("[现场端通用命令] 序列化 RegisterPayload 失败: {}", e);
-    //         return Err(format!("构建注册请求数据失败: {}", e));
-    //     }
-    // };
-    // let ws_message = WsMessage {
-    //     message_id: Uuid::new_v4().to_string(),
-    //     timestamp: Utc::now().timestamp_millis(),
-    //     message_type: REGISTER_MESSAGE_TYPE.to_string(),
-    //     payload: serialized_payload,
-    // };
 
     // 4. 获取 WsClientService 实例
     // 使用 app_handle.state() 是更推荐的获取 Tauri 托管状态的方式
@@ -299,8 +288,8 @@ pub async fn register_client_with_task(
     match ws_service.send_ws_message(ws_message).await {
         Ok(_) => {
             info!(
-                "[现场端通用命令] 已通过 WsService 发送 'Register' 消息, 组ID: {}, 任务ID: {}",
-                group_id, task_id
+                "[现场端通用命令] 已通过 WsService 发送 'Register' 消息, 组ID: {}, 任务ID: {}, 显示名称: {:?}",
+                group_id, task_id, register_payload.client_display_name // 引用 payload 中的字段
             );
             Ok(())
         }

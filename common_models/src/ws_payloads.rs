@@ -141,6 +141,12 @@ pub struct RegisterPayload {
     /// 客户端希望关联的调试任务的唯一ID。
     /// 此ID用于在云端初始化或关联到特定的任务状态。
     pub task_id: String,
+    /// (新增) 客户端软件的版本信息，可选。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_software_version: Option<String>,
+    /// (新增) 客户端的显示名称，可选。用于在伙伴列表中展示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_display_name: Option<String>,
 }
 
 /// 服务器对 "Register" 消息的响应负载。
@@ -292,6 +298,8 @@ mod tests {
             group_id: "test_group_123".to_string(),
             role: ClientRole::ControlCenter,
             task_id: "task_abc_789".to_string(),
+            client_software_version: None,
+            client_display_name: None,
         };
 
         // 测试序列化
@@ -316,6 +324,8 @@ mod tests {
             group_id: "clone_group".to_string(),
             role: ClientRole::OnSiteMobile,
             task_id: "clone_task".to_string(),
+            client_software_version: None,
+            client_display_name: None,
         };
         let cloned_payload = payload.clone();
         assert_eq!(payload.group_id, cloned_payload.group_id);

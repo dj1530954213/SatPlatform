@@ -10,6 +10,7 @@ use log::{debug, error, info, warn};
 use rust_websocket_utils::client::transport;
 use rust_websocket_utils::client::transport::ClientWsStream;
 use rust_websocket_utils::message::WsMessage;
+use rust_websocket_utils::error::WsError;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{RwLock};
 use tokio::sync::Mutex as TokioMutex;
@@ -237,9 +238,47 @@ impl WebSocketClientService {
                                          ).await;
                                     }
                                     Some(Err(e)) => {
-                                        error!("[SatOnSiteMobile] (连接任务) 消息接收或解析时发生错误: {}", e);
-                                        final_error_message = Some(format!("接收消息时出错: {}", e));
-                                        break; 
+                                        // 更新为中心端更详细的错误处理
+                                        error!("[SatOnSiteMobile] (连接任务) 消息接收或解析时发生错误: {:?}", e);
+                                        match e {
+                                            rust_websocket_utils::error::WsError::WebSocketProtocolError(ws_err) => {
+                                                match ws_err {
+                                                    tokio_tungstenite::tungstenite::Error::ConnectionClosed => {
+                                                        warn!("[SatOnSiteMobile] (连接任务) WebSocket 连接已由对方关闭 (via Tungstenite Error)。");
+                                                        final_error_message = Some("WebSocket 连接已由对方关闭".to_string());
+                                                        break;
+                                                    }
+                                                    tokio_tungstenite::tungstenite::Error::Protocol(protocol_err) => {
+                                                        warn!("[SatOnSiteMobile] (连接任务) WebSocket 协议错误 (例如收到Close帧): {:?}", protocol_err);
+                                                        final_error_message = Some(format!("WebSocket 协议错误: {:?}", protocol_err));
+                                                        break;
+                                                    }
+                                                    other_tungstenite_err => {
+                                                        error!("[SatOnSiteMobile] (连接任务) 接收消息时发生 Tungstenite 错误: {:?}", other_tungstenite_err);
+                                                        final_error_message = Some(format!("接收消息时发生 Tungstenite 错误: {:?}", other_tungstenite_err));
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            rust_websocket_utils::error::WsError::DeserializationError(de_err) => {
+                                                // 通常在 process_received_message 内部处理更具体的反序列化错误
+                                                // 但如果错误发生在 transport::receive_message 本身（例如，它尝试解析外层 WsMessage 结构失败）
+                                                error!("[SatOnSiteMobile] (连接任务) WsMessage级别 JSON (反)序列化错误: {:?}", de_err);
+                                                // 对于这种基本结构错误，可能也需要断开
+                                                final_error_message = Some(format!("核心消息结构解析错误: {:?}", de_err));
+                                                break; 
+                                            }
+                                            rust_websocket_utils::error::WsError::IoError(io_err) => {
+                                                error!("[SatOnSiteMobile] (连接任务) IO 错误: {:?}", io_err);
+                                                final_error_message = Some(format!("IO 错误: {:?}", io_err));
+                                                break;
+                                            }
+                                            other_ws_util_err => { 
+                                                error!("[SatOnSiteMobile] (连接任务) 接收消息时发生未处理的 WsUtilError: {:?}", other_ws_util_err);
+                                                final_error_message = Some(format!("接收消息时发生未处理的库错误: {:?}", other_ws_util_err));
+                                                break; 
+                                            }
+                                        }
                                     }
                                     None => {
                                         info!("[SatOnSiteMobile] (连接任务) WebSocket 连接已由对端关闭。");
@@ -403,7 +442,8 @@ impl WebSocketClientService {
                             success: true,
                             message: payload.message.clone(), // 使用云端返回的成功消息
                             assigned_client_id: Some(client_id_uuid.to_string()), 
-                            group_id: payload.effective_group_id.clone(), 
+                            group_id: payload.effective_group_id.clone(),
+                            role: payload.effective_role.as_ref().map(|r| r.to_string()), // 从 payload.effective_role 获取
                             // TODO: 从 RegisterResponsePayload 中获取 task_id 并填充。
                             // 目前 RegisterResponsePayload (common_models) 定义中可能不直接包含 task_id，
                             // 需要确认云端是否会返回，以及前端是否需要通过此事件获取 task_id。
@@ -429,6 +469,7 @@ impl WebSocketClientService {
                             message: payload.message.clone(), // 使用云端返回的失败消息
                             assigned_client_id: None,
                             group_id: None,
+                            role: None, // 注册失败时 role 也为 None
                             task_id: None,
                         };
                          if let Err(e) = app_handle.emit(WS_REGISTRATION_STATUS_EVENT, reg_status_payload.clone()) {
@@ -508,19 +549,12 @@ impl WebSocketClientService {
                      info!("[现场端移动服务] (处理消息) 本地任务状态缓存已更新为来自云端的最新状态 (任务ID: {}).", new_state.task_id);
                      
                      // 构造发送给前端的 LocalTaskStateUpdatedEventPayload 事件负载
-                     // LocalTaskStateUpdatedEventPayload (在 event.rs 定义) 的 new_state 字段需要是 serde_json::Value 类型
-                     match serde_json::to_value(new_state.clone()) { // 将 TaskDebugState 序列化为 serde_json::Value
-                         Ok(state_value) => {
-                             let event_payload = LocalTaskStateUpdatedEventPayload { new_state: state_value };
-                             if let Err(e) = app_handle.emit(LOCAL_TASK_STATE_UPDATED_EVENT, event_payload.clone()) { 
-                                 error!("[现场端移动服务] (处理消息) 发送本地任务状态已更新事件 ({}) 给前端失败: {}", LOCAL_TASK_STATE_UPDATED_EVENT, e);
-                             } else {
-                                info!("[现场端移动服务] (处理消息) 已成功发送本地任务状态已更新事件 ({}) 给前端。", LOCAL_TASK_STATE_UPDATED_EVENT);
-                             }
-                         }
-                         Err(e) => { // 序列化 TaskDebugState 为 serde_json::Value 失败
-                             error!("[现场端移动服务] (处理消息) 序列化 TaskDebugState (任务ID: {}) 为 serde_json::Value 以便发送事件时失败: {}", new_state.task_id, e);
-                         }
+                     // event.rs 中的 LocalTaskStateUpdatedEventPayload.new_state 现在直接是 TaskDebugState 类型
+                     let event_payload = LocalTaskStateUpdatedEventPayload { new_state: new_state.clone() }; // 直接使用克隆的 new_state
+                     if let Err(e) = app_handle.emit(LOCAL_TASK_STATE_UPDATED_EVENT, event_payload.clone()) { 
+                         error!("[现场端移动服务] (处理消息) 发送本地任务状态已更新事件 ({}) 给前端失败: {}", LOCAL_TASK_STATE_UPDATED_EVENT, e);
+                     } else {
+                        info!("[现场端移动服务] (处理消息) 已成功发送本地任务状态已更新事件 ({}) 给前端。", LOCAL_TASK_STATE_UPDATED_EVENT);
                      }
                  }
                  Err(e) => { // 反序列化 TaskDebugState 失败
@@ -872,5 +906,60 @@ impl WebSocketClientService {
         // (因为 TaskDebugState 派生了 Clone trait)。
         // 如果 Option 是 None，则克隆结果仍然是 None。
         cache_guard.clone()
+    }
+
+    /// 发送 Echo 消息到 WebSocket 服务器。
+    pub async fn send_echo_message(&self, payload: EchoPayload) -> Result<(), String> {
+        info!(
+            "[SatOnSiteMobile] WebSocketClientService::send_echo_message 调用，内容: '{}'",
+            payload.content
+        );
+        if !self.is_connected().await {
+            let err_msg = "WebSocket 未连接，无法发送 Echo 消息。".to_string();
+            error!("[SatOnSiteMobile] {}", err_msg);
+            return Err(err_msg);
+        }
+
+        match WsMessage::new(ECHO_MESSAGE_TYPE.to_string(), &payload) {
+            Ok(ws_message) => self.send_ws_message(ws_message).await,
+            Err(e) => {
+                let err_msg = format!("创建 Echo WsMessage 失败: {:?}", e);
+                error!("[SatOnSiteMobile] {}", err_msg);
+                Err(err_msg)
+            }
+        }
+    }
+
+    /// 发送特定类型的业务消息到 WebSocket 服务器。
+    /// 这是一个通用方法，用于封装构建 WsMessage 并发送的逻辑。
+    pub async fn send_specific_message<T>(
+        &self, 
+        message_type: &str, 
+        payload_obj: &T
+    ) -> Result<(), String> 
+    where 
+        T: serde::Serialize + Send + Sync + std::fmt::Debug
+    {
+        info!(
+            "[SatOnSiteMobile] WebSocketClientService::send_specific_message 调用，类型: '{}', Payload: {:?}",
+            message_type, payload_obj
+        );
+        if !self.is_connected().await {
+            let err_msg = format!("WebSocket 未连接，无法发送类型为 '{}' 的消息。", message_type);
+            error!("[SatOnSiteMobile] {}", err_msg);
+            return Err(err_msg);
+        }
+
+        match WsMessage::new(message_type.to_string(), payload_obj) {
+            Ok(ws_message) => {
+                debug!("[SatOnSiteMobile] 准备发送构建好的WsMessage: ID={}, Type={}, Timestamp={}", ws_message.message_id, ws_message.message_type, ws_message.timestamp);
+                self.send_ws_message(ws_message).await
+            }
+            Err(e) => {
+                let err_msg = format!("创建类型为 '{}' 的 WsMessage 失败: {:?}", message_type, e);
+                error!("[SatOnSiteMobile] {}", err_msg);
+                Err(err_msg)
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
-// SatOnSiteMobile/src-tauri/src/commands/mod.rs
+// SatControlCenter/src-tauri/src/commands/mod.rs
 
-//! `SatOnSiteMobile` (现场端移动应用) 的 Tauri 命令模块根文件。
+//! `SatControlCenter` (中心控制端应用) 的 Tauri 命令模块根文件。
 //!
 //! 本模块 (`commands`) 聚合了应用中所有可由前端通过 `invoke` 调用的 Rust 函数 (即 Tauri 命令)。
 //! 每个子模块通常按功能或相关性组织一组命令。
@@ -30,9 +30,13 @@ pub mod data_cmds;
 /// 例如：启动/停止测试步骤、发送测试步骤反馈、确认预检查项等。
 pub mod test_cmds;
 
-/// 移动端特定功能命令模块 (项目阶段 P13.3.1 引入，如果需要)。
-/// 例如：访问设备原生 API（相机、GPS）、处理移动端特有的用户交互等。
-pub mod mobile_cmds;
+// 根据现场端添加模块声明 (mobile_cmds 可能不需要，这里先注释掉，其他按需添加)
+// pub mod mobile_cmds; // 中心端通常不需要移动端特定命令
+
+pub mod dev_tools_cmds;     // 新增
+pub mod app_lifecycle_cmds; // 新增
+pub mod network_cmds;       // 新增
+pub mod ws_cmds;            // 新增
 
 // --- 公开导出 (Re-export) --- 
 // 为了方便在 `main.rs` 中使用 `tauri::generate_handler!` 宏一次性注册来自 `general_cmds` 模块的所有命令，
@@ -41,9 +45,19 @@ pub mod mobile_cmds;
 // 可以取消注释或添加相应的 `pub use ...::*;` 语句。
 // 或者，在 `main.rs` 的 `generate_handler!` 中分别列出每个模块的命令：
 // `tauri::generate_handler![general_cmds::my_cmd, task_cmds::another_cmd]`
-// pub use general_cmds::*; 
 
-// 提示：如果 `SatOnSiteMobile` 应用未来引入更多类别的命令，
+// pub use general_cmds::*; // 根据需要决定是否导出 general_cmds
+pub use task_cmds::*;      // 导出 task_cmds
+
+// 导出新增模块
+pub use dev_tools_cmds::*;
+pub use app_lifecycle_cmds::*;
+pub use network_cmds::*;
+pub use ws_cmds::*;
+
+// 提示：如果 `SatControlCenter` 应用未来引入更多类别的命令，
 // 请在此处添加相应的 `pub mod` 声明，并在需要时调整导出策略。
 
-// 如果 SatOnSiteMobile 有其他命令模块，也在这里声明 
+// 如果 SatControlCenter 有其他命令模块，也在这里声明
+
+// 如果 SatControlCenter 有其他命令模块，也在这里声明 

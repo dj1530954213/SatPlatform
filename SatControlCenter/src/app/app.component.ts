@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { TauriListenerService, PartnerInfo } from './core/services/tauri-listener.service'; // 确保路径正确
 import { CommonModule } from '@angular/common'; // 引入 CommonModule
+import { DebugSenderComponent } from './features/debug-tools/debug-sender/debug-sender.component'; // <-- 修正导入路径
 
 // WebSocket 连接状态事件的 Payload (与 Rust 端 WsConnectionStatusEventPayload 对应)
 interface WsConnectionStatusEventPayload {
@@ -66,7 +67,7 @@ interface LocalTaskStateUpdatedEventPayload {
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [FormsModule, CommonModule], // 添加 CommonModule 到 imports
+  imports: [FormsModule, CommonModule, DebugSenderComponent], // <-- 添加到 imports
   templateUrl: './app.component.html',
   styleUrls: ['./app.component.css']
 })

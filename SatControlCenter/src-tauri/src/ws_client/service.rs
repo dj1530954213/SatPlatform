@@ -9,8 +9,8 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use rust_websocket_utils::client::transport;
 use rust_websocket_utils::client::transport::ClientWsStream;
-use rust_websocket_utils::error::WsError;
 use rust_websocket_utils::message::WsMessage;
+use rust_websocket_utils::error::WsError;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{RwLock};
 use tokio::sync::Mutex as TokioMutex;
@@ -812,6 +812,61 @@ impl WebSocketClientService {
     /// * `Option<TaskDebugState>`: 如果缓存中有状态，则返回其克隆，否则返回 `None`。
     pub async fn get_cached_task_state(&self) -> Option<TaskDebugState> {
         self.local_task_state_cache.read().await.clone()
+    }
+
+    /// 发送 Echo 消息到 WebSocket 服务器。
+    pub async fn send_echo_message(&self, payload: EchoPayload) -> Result<(), String> {
+        info!(
+            "[SatControlCenter] WebSocketClientService::send_echo_message 调用，内容: '{}'", // 日志前缀修改
+            payload.content
+        );
+        if !self.is_connected().await {
+            let err_msg = "WebSocket 未连接，无法发送 Echo 消息。".to_string();
+            error!("[SatControlCenter] {}", err_msg); // 日志前缀修改
+            return Err(err_msg);
+        }
+
+        match WsMessage::new(ECHO_MESSAGE_TYPE.to_string(), &payload) {
+            Ok(ws_message) => self.send_ws_message(ws_message).await,
+            Err(e) => {
+                let err_msg = format!("创建 Echo WsMessage 失败: {:?}", e);
+                error!("[SatControlCenter] {}", err_msg); // 日志前缀修改
+                Err(err_msg)
+            }
+        }
+    }
+
+    /// 发送特定类型的业务消息到 WebSocket 服务器。
+    /// 这是一个通用方法，用于封装构建 WsMessage 并发送的逻辑。
+    pub async fn send_specific_message<T>(
+        &self, 
+        message_type: &str, 
+        payload_obj: &T
+    ) -> Result<(), String> 
+    where 
+        T: serde::Serialize + Send + Sync + std::fmt::Debug
+    {
+        info!(
+            "[SatControlCenter] WebSocketClientService::send_specific_message 调用，类型: '{}', Payload: {:?}", // 日志前缀修改
+            message_type, payload_obj
+        );
+        if !self.is_connected().await {
+            let err_msg = format!("WebSocket 未连接，无法发送类型为 '{}' 的消息。", message_type);
+            error!("[SatControlCenter] {}", err_msg); // 日志前缀修改
+            return Err(err_msg);
+        }
+
+        match WsMessage::new(message_type.to_string(), payload_obj) {
+            Ok(ws_message) => {
+                debug!("[SatControlCenter] 准备发送构建好的WsMessage: ID={}, Type={}, Timestamp={}", ws_message.message_id, ws_message.message_type, ws_message.timestamp); // 日志前缀修改
+                self.send_ws_message(ws_message).await
+            }
+            Err(e) => {
+                let err_msg = format!("创建类型为 '{}' 的 WsMessage 失败: {:?}", message_type, e);
+                error!("[SatControlCenter] {}", err_msg); // 日志前缀修改
+                Err(err_msg)
+            }
+        }
     }
 }
 

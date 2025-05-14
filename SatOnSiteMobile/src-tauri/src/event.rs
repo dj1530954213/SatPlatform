@@ -7,6 +7,7 @@
 //! 以及其他重要的后端状态或操作结果。
 
 use serde::{Serialize, Deserialize};
+use common_models::TaskDebugState; // 确保导入 TaskDebugState
 // 尝试从 common_models 引入 ClientRole，如果事件负载中确实需要强类型角色。
 // use common_models::enums::ClientRole;
 
@@ -93,6 +94,9 @@ pub struct WsRegistrationStatusEventPayload {
     /// 如果注册成功且操作涉及特定任务，此字段可能包含与当前会话关联的任务 ID。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// 新增 role 字段
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// WebSocket 伙伴客户端状态更新事件的名称常量。
@@ -142,6 +146,15 @@ pub struct LocalTaskStateUpdatedEventPayload {
     /// 前端在接收此事件时，应能将此 `serde_json::Value` 解析回其在 TypeScript 中定义的相应 `TaskDebugState` 接口或类。
     /// 另一种选择是直接使用 `common_models::TaskDebugState` 类型，前提是该类型已在 `common_models` crate 中定义，
     /// 并且 `SatOnSiteMobile` 项目的 `Cargo.toml` 中正确依赖了 `common_models`，且 `TaskDebugState` 实现了 `Serialize` 和 `Deserialize`。
-    // pub new_state: common_models::task_state::TaskDebugState, // 替代方案示例
-    pub new_state: serde_json::Value, 
+    pub new_state: TaskDebugState,
+}
+
+// 新增 WS_SERVER_ERROR_EVENT 和其 Payload (与中心端对齐)
+pub const WS_SERVER_ERROR_EVENT: &str = "ws_server_error_event";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsServerErrorEventPayload {
+    pub error_message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_message_type: Option<String>,
 } 
