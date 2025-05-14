@@ -37,6 +37,7 @@ use common_models::task_models::PreCheckItemStatus; // Keep PreCheckItemStatus
 use chrono::Utc; // 引入Utc以获取当前时间
 use serde_json; // serde_json is used
 use uuid; // uuid is used
+use crate::ws_server::connection_manager::ConnectionManager; // 确保引入 ConnectionManager
 
 /// `TaskStateManager` (任务状态管理器) 结构体的定义 (当前为P3.1.2阶段的骨架实现)。
 /// 
@@ -299,7 +300,7 @@ impl TaskStateManager {
     pub async fn force_broadcast_state(
         &self,
         group_id: &str,
-        conn_manager: &Arc<super::connection_manager::ConnectionManager>, // 接收 Arc<ConnectionManager> 的引用
+        conn_manager: &Arc<ConnectionManager>, // 接收 Arc<ConnectionManager> 的引用
     ) {
         info!("[任务状态管理器] 尝试为组 '{}' 强制广播 TaskDebugState...", group_id);
         match self.get_task_state(group_id).await {
@@ -323,7 +324,7 @@ impl TaskStateManager {
         &self,
         group_id: &str,
         task_state: &TaskDebugState,
-        conn_manager: &super::connection_manager::ConnectionManager, 
+        conn_manager: &ConnectionManager, 
     ) {
         info!("[任务状态管理器] 准备为组 '{}' 广播 TaskDebugState 更新...", group_id);
         let clients_in_group = conn_manager.get_group_members_for_broadcast(group_id, None).await;
@@ -379,6 +380,7 @@ impl TaskStateManager {
     /// * `payload` - 接收到的业务消息 Payload。
     /// * `source_role` - 发送消息的客户端角色。
     /// * `source_client_id` - 发送消息的客户端ID。
+    /// * `conn_manager` - 连接管理器实例。
     ///
     /// # Returns
     /// * `Result<(), String>` - 如果处理成功，则返回 `Ok(())`，否则返回包含错误描述的 `Err(String)`。
@@ -389,149 +391,64 @@ impl TaskStateManager {
         payload: serde_json::Value,
         source_role: ClientRole,
         source_client_id: &str,
+        conn_manager: Arc<ConnectionManager>, // 新增参数
     ) -> Result<(), String> {
         info!(
-            "[TaskStateManager] Processing business message. group_id: '{}', message_type: '{}', source_role: {:?}, source_client_id: {}",
+            "[TaskStateManager] Processing business message. GroupID: '{}', Type: '{}', SourceRole: {:?}, SourceClientID: '{}'",
             group_id, message_type, source_role, source_client_id
         );
+        // 权限检查（P7.1.3 待实现）
+        // info!("权限检查点: 角色 {:?} 正在尝试对组 '{}' 执行操作 '{}'", source_role, group_id, message_type);
 
-        match self.active_task_states.get_mut(group_id) {
-            Some(mut task_state_entry) => {
-                let mut task_state_guard = task_state_entry.value_mut().write().await;
-                let mut state_changed = false;
+        let task_state_arc = self.get_task_state(group_id).await.ok_or_else(|| {
+            let err_msg = format!("TaskDebugState not found for group_id: {}", group_id);
+            error!("{}", err_msg);
+            err_msg
+        })?;
 
-                match message_type {
-                    ws_payloads::UPDATE_PRE_CHECK_ITEM_TYPE => {
-                        match serde_json::from_value::<common_models::task_models::UpdatePreCheckItemPayload>(payload.clone()) {
-                            Ok(parsed_payload) => {
-                                info!("[TaskStateManager] Processing UpdatePreCheckItem: {:?}", parsed_payload);
-                                let item_id = parsed_payload.item_id.clone();
-                                
-                                let pre_check_item = task_state_guard.pre_check_items
-                                    .entry(item_id.clone())
-                                    .or_insert_with(|| PreCheckItemStatus::new(item_id));
+        let mut task_state_guard = task_state_arc.write().await;
+        // 更新元数据
+        // task_state_guard.last_updated_by_client_id = Some(source_client_id.to_string()); // Field does not exist in TaskDebugState
+        task_state_guard.last_updated_by_role = Some(source_role.clone());
+        // last_update_timestamp 会在 priv_handle 方法中如果 state_changed 则更新，或者在这里统一更新
+        // task_state_guard.last_update_timestamp = Utc::now(); // 或者在 priv_handle_* 中处理
 
-                                let current_time = Utc::now();
-                                match source_role {
-                                    ClientRole::OnSiteMobile => {
-                                        if pre_check_item.status_from_site != Some(parsed_payload.status.clone()) || pre_check_item.notes_from_site != parsed_payload.notes {
-                                            pre_check_item.status_from_site = Some(parsed_payload.status);
-                                            pre_check_item.notes_from_site = parsed_payload.notes;
-                                            pre_check_item.last_updated = current_time;
-                                            state_changed = true;
-                                        }
-                                    }
-                                    ClientRole::ControlCenter => {
-                                        if pre_check_item.status_from_control != Some(parsed_payload.status.clone()) || pre_check_item.notes_from_control != parsed_payload.notes {
-                                            pre_check_item.status_from_control = Some(parsed_payload.status);
-                                            pre_check_item.notes_from_control = parsed_payload.notes;
-                                            pre_check_item.last_updated = current_time;
-                                            state_changed = true;
-                                        }
-                                    }
-                                    _ => {
-                                        warn!("[TaskStateManager] UpdatePreCheckItem operation attempted by role {:?} which is not allowed", source_role);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("[TaskStateManager] Failed to parse UpdatePreCheckItemPayload for group {}: {:?}", group_id, e);
-                                return Err(format!("Failed to parse UpdatePreCheckItemPayload: {}", e));
-                            }
-                        }
-                    }
-                    ws_payloads::START_SINGLE_TEST_STEP_TYPE => {
-                        match serde_json::from_value::<common_models::task_models::StartSingleTestStepPayload>(payload.clone()) {
-                            Ok(parsed_payload) => {
-                                info!("[TaskStateManager] TODO: Processing StartSingleTestStep: {:?}", parsed_payload);
-                                // state_changed = ...; // 实现具体逻辑并更新 state_changed
-                            }
-                            Err(e) => { 
-                                log::error!("[TaskStateManager] Failed to parse StartSingleTestStepPayload for group {}: {:?}", group_id, e);
-                                return Err(format!("Failed to parse StartSingleTestStepPayload: {}", e));
-                            }
-                        }
-                    }
-                    ws_payloads::FEEDBACK_SINGLE_TEST_STEP_TYPE => {
-                        match serde_json::from_value::<common_models::task_models::FeedbackSingleTestStepPayload>(payload.clone()) {
-                            Ok(parsed_payload) => {
-                                info!("[TaskStateManager] TODO: Processing FeedbackSingleTestStep: {:?}", parsed_payload);
-                                // state_changed = ...; // 实现具体逻辑并更新 state_changed
-                            }
-                            Err(e) => { 
-                                log::error!("[TaskStateManager] Failed to parse FeedbackSingleTestStepPayload for group {}: {:?}", group_id, e);
-                                return Err(format!("Failed to parse FeedbackSingleTestStepPayload: {}", e));
-                            }
-                        }
-                    }
-                    ws_payloads::CONFIRM_SINGLE_TEST_STEP_TYPE => {
-                        match serde_json::from_value::<common_models::task_models::ConfirmSingleTestStepPayload>(payload.clone()) {
-                            Ok(parsed_payload) => {
-                                info!("[TaskStateManager] TODO: Processing ConfirmSingleTestStep: {:?}", parsed_payload);
-                                // state_changed = ...; // 实现具体逻辑并更新 state_changed
-                            }
-                            Err(e) => { 
-                                log::error!("[TaskStateManager] Failed to parse ConfirmSingleTestStepPayload for group {}: {:?}", group_id, e);
-                                return Err(format!("Failed to parse ConfirmSingleTestStepPayload: {}", e));
-                            }
-                        }
-                    }
-                    UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE => {
-                        match serde_json::from_value::<UpdateTaskDebugNotePayload>(payload.clone()) {
-                            Ok(note_payload) => {
-                                // 确保 group_id 一致性检查 (可选，但推荐)
-                                if group_id != note_payload.group_id {
-                                    log::warn!(
-                                        "[TaskStateManager] Mismatch in group_id for UpdateTaskDebugNote. Expected '{}', got '{}'. Ignoring.",
-                                        group_id, note_payload.group_id
-                                    );
-                                    return Err(format!("GroupID mismatch for UpdateTaskDebugNote. Expected '{}', got '{}'", group_id, note_payload.group_id));
-                                }
-                                // 调用私有方法处理，注意 payload 现在是 UpdateTaskDebugNotePayload 类型，直接传递
-                                state_changed = self.priv_handle_update_task_debug_note(&mut task_state_guard, note_payload, source_role).await?;
-                            }
-                            Err(e) => { 
-                                log::error!("[TaskStateManager] Failed to parse UpdateTaskDebugNotePayload for group {}: {:?}", group_id, e);
-                                return Err(format!("Failed to parse UpdateTaskDebugNotePayload: {}", e));
-                            }
-                        }
-                    }
-                    _ => {
-                        log::warn!(
-                            "[TaskStateManager] Received unknown business message type: '{}' for group_id: '{}' from client_id: {}",
-                            message_type,
-                            group_id,
-                            source_client_id
-                        );
-                        return Err(format!("Unknown business message type: {}", message_type));
-                    }
-                }
+        let mut state_changed = false;
 
-                if state_changed {
-                    task_state_guard.last_updated_by_role = Some(source_role);
-                    task_state_guard.last_update_timestamp = Utc::now();
-                    task_state_guard.version += 1; // 版本号递增
-                    info!(
-                        "[TaskStateManager] group_id '{}' 的任务状态已更新。新版本: {}. 最后更新者: {:?}",
-                        group_id, task_state_guard.version, source_role
-                    );
-                    Ok(())
-                } else {
-                    info!(
-                        "[TaskStateManager] group_id '{}' 的任务状态未发生实际改变。",
-                        group_id
-                    );
-                    Ok(())
+        match message_type {
+            ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE => {
+                match serde_json::from_value::<UpdateTaskDebugNotePayload>(payload.clone()) {
+                    Ok(parsed_payload) => {
+                        match self.priv_handle_update_task_debug_note(&mut task_state_guard, parsed_payload, source_role.clone()).await {
+                            Ok(changed) => state_changed = changed,
+                            Err(e) => return Err(format!("Error in priv_handle_update_task_debug_note: {}", e)),
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to parse UpdateTaskDebugNotePayload for group '{}': {}. Payload: {:?}", group_id, e, payload);
+                        error!("{}", err_msg);
+                        return Err(err_msg);
+                    }
                 }
             }
-            None => {
-                warn!(
-                    "[TaskStateManager] Attempted to process business message for unknown group_id: '{}'",
-                    group_id
-                );
-                Err(format!("Unknown group_id: {}", group_id))
+            // TODO: (P7.1.3) 实现其他业务消息类型的处理分支
+            // ws_payloads::UPDATE_PRE_CHECK_ITEM_STATUS_MESSAGE_TYPE => { ... }
+            // ws_payloads::START_SINGLE_TEST_STEP_MESSAGE_TYPE => { ... }
+            // ws_payloads::FEEDBACK_SINGLE_TEST_STEP_MESSAGE_TYPE => { ... }
+            _ => {
+                let err_msg = format!("Unknown or unsupported business message type '{}' received for group '{}'.", message_type, group_id);
+                warn!("{}", err_msg);
+                return Err(err_msg);
             }
         }
+
+        if state_changed {
+            // 更新时间戳应在确认状态改变之后，在广播之前
+            task_state_guard.last_update_timestamp = Utc::now();
+            self.priv_broadcast_task_state(group_id, &*task_state_guard, &conn_manager).await; // 调用广播
+        }
+
+        Ok(())
     }
 
     // P4.2.1: 新增私有方法用于处理更新任务调试备注的逻辑
@@ -542,30 +459,62 @@ impl TaskStateManager {
         _source_role: ClientRole, // source_role 暂时未使用，但保留以备将来可能的权限控制
     ) -> Result<bool, String> { // 返回Result<bool, String>，bool表示状态是否实际改变
         info!(
-            "[TaskStateManager] priv_handle_update_task_debug_note for group_id: '{}', new_note: '{}'",
-            payload.group_id, payload.new_note
+            "[TaskStateManager] priv_handle_update_task_debug_note for group_id: '{}', new_note: '{}', custom_shared_data: {:?}",
+            payload.group_id, payload.new_note, payload.custom_shared_data
         );
 
-        // 业务逻辑：更新 TaskDebugState 的 general_debug_notes 字段
-        // 检查备注是否真的发生了变化
-        let note_changed = task_state.general_debug_notes.as_ref() != Some(&payload.new_note);
-        
-        if note_changed {
+        let mut changed = false;
+
+        // 更新 general_debug_notes
+        if task_state.general_debug_notes.as_ref() != Some(&payload.new_note) {
             task_state.general_debug_notes = Some(payload.new_note);
-            // 如果需要，可以在这里更新其他元数据，例如 last_updated_by_specific_action_timestamp
-            // task_state.version += 1; // 版本号的增加统一在 process_business_message 或 update_state_and_get_updated 中处理
             info!(
                 "[TaskStateManager] Group '{}' general_debug_notes updated.",
                 payload.group_id
             );
-            Ok(true) // 状态已改变
+            changed = true;
         } else {
             info!(
                 "[TaskStateManager] Group '{}' general_debug_notes not changed (new note is same as current).",
                 payload.group_id
             );
-            Ok(false) // 状态未改变
         }
+
+        // 更新 custom_shared_data
+        // 只有当 payload 中明确提供了 custom_shared_data 时才进行比较和更新
+        if payload.custom_shared_data.is_some() {
+            if task_state.custom_shared_data != payload.custom_shared_data {
+                task_state.custom_shared_data = payload.custom_shared_data;
+                info!(
+                    "[TaskStateManager] Group '{}' custom_shared_data updated.",
+                    payload.group_id
+                );
+                changed = true;
+            } else {
+                info!(
+                    "[TaskStateManager] Group '{}' custom_shared_data not changed (new data is same as current or payload did not provide it).",
+                    payload.group_id
+                );
+            }
+        } else {
+            // 如果 payload 中没有 custom_shared_data，我们通常不应该清除 task_state 中的现有值，除非业务逻辑如此要求。
+            // 当前逻辑：如果 payload.custom_shared_data 是 None，则不修改 task_state.custom_shared_data。
+            // 如果需要 "如果payload中为None则清除" 的逻辑，则需要添加:
+            // else if task_state.custom_shared_data.is_some() {
+            //     task_state.custom_shared_data = None;
+            //     changed = true;
+            //     info!(
+            //         "[TaskStateManager] Group '{}' custom_shared_data cleared as payload did not provide it.",
+            //         payload.group_id
+            //     );
+            // }
+             info!(
+                "[TaskStateManager] Group '{}' custom_shared_data not provided in payload, existing value in task_state retained.",
+                payload.group_id
+            );
+        }
+
+        Ok(changed) // 返回状态是否改变
     }
 }
 

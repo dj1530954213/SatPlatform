@@ -13,13 +13,14 @@ export class DebugService {
 
   constructor() { }
 
-  async sendDebugNoteFromSite(groupId: string, newNote: string): Promise<GenericResponse> {
+  async sendDebugNoteFromSite(groupId: string, newNote: string, customSharedDataJsonString?: string): Promise<GenericResponse> {
     try {
       const response = await invoke<GenericResponse>('send_debug_note_from_site_cmd', {
         groupId,
-        newNote
+        newNote,
+        customSharedDataJsonString
       });
-      console.log('Sent debug note from site, response:', response);
+      console.log('Sent debug note from site (with custom data if provided), response:', response);
       return response;
     } catch (error) {
       console.error('Error sending debug note from site:', error);

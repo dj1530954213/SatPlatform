@@ -321,7 +321,7 @@ impl WebSocketClientService {
             // 而不是当前 tokio::spawn 任务自身的 JoinHandle。
             // 目的是检查全局存储的句柄是否就是刚刚完成的这个任务的句柄。
             let mut task_guard = connection_task_handle_clone.lock().await; // 获取主服务中存储的任务句柄的锁
-             if let Some(current_handle_in_service) = task_guard.as_ref() {
+             if let Some(_current_handle_in_service) = task_guard.as_ref() {
                  // 比较句柄是否指向同一个任务 (JoinHandle 不直接支持 PartialEq, 但可以通过 id 或其他方式间接比较，
                  // 或者更简单地，如果此任务结束时全局句柄仍然是 Some(_)，则通常意味着它是当前句柄)
                  // 为简化，这里假设如果存在句柄，就清除它。更严谨的做法可能需要比较任务ID。

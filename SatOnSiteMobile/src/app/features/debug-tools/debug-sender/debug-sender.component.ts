@@ -13,6 +13,7 @@ import { CommonModule } from '@angular/common'; // 导入 CommonModule for ngIf
 export class DebugSenderComponent {
   groupId: string = 'test_group_01'; // 默认 GroupID，与您测试时使用的保持一致
   debugNote: string = 'Test note from OnSiteMobile UI @ ' + new Date().toLocaleTimeString();
+  customSharedDataString: string = '{}'; // 新增属性，默认为空JSON对象字符串
   isLoading: boolean = false;
   apiResponse: GenericResponse | null = null;
 
@@ -26,7 +27,20 @@ export class DebugSenderComponent {
     this.isLoading = true;
     this.apiResponse = null;
     try {
-      this.apiResponse = await this.debugService.sendDebugNoteFromSite(this.groupId, this.debugNote);
+      // 尝试解析 customSharedDataString
+      let customData: object | null = null;
+      try {
+        if (this.customSharedDataString.trim() !== '') {
+          customData = JSON.parse(this.customSharedDataString);
+        }
+      } catch (parseError) {
+        this.apiResponse = { success: false, message: 'Invalid JSON format for Custom Shared Data.' };
+        this.isLoading = false;
+        return;
+      }
+      // 更新对 debugService 的调用，传递 customSharedDataString (或解析后的 customData，取决于服务如何设计)
+      // 假设服务期望接收原始字符串，并在Rust端进行解析
+      this.apiResponse = await this.debugService.sendDebugNoteFromSite(this.groupId, this.debugNote, this.customSharedDataString);
     } catch (error) {
       // The service already catches and formats the error, but we can log it again if needed
       console.error("Error in component while sending note:", error);

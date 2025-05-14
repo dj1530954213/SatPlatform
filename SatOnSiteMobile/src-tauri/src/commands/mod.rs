@@ -34,6 +34,12 @@ pub mod test_cmds;
 /// 例如：访问设备原生 API（相机、GPS）、处理移动端特有的用户交互等。
 pub mod mobile_cmds;
 
+// 新增缺失的模块声明
+pub mod dev_tools_cmds;
+pub mod app_lifecycle_cmds;
+pub mod network_cmds;
+pub mod ws_cmds;
+
 // --- 公开导出 (Re-export) --- 
 // 为了方便在 `main.rs` 中使用 `tauri::generate_handler!` 宏一次性注册来自 `general_cmds` 模块的所有命令，
 // 我们在这里将 `general_cmds` 模块中的所有公共项（通常是 `#[tauri::command]` 函数）重新导出。
@@ -44,6 +50,12 @@ pub mod mobile_cmds;
 pub use general_cmds::*; 
 
 pub use task_commands::*;
+
+// 新增缺失模块的导出
+pub use dev_tools_cmds::*;
+pub use app_lifecycle_cmds::*;
+pub use network_cmds::*;
+pub use ws_cmds::*;
 
 // 提示：如果 `SatOnSiteMobile` 应用未来引入更多类别的命令，
 // 请在此处添加相应的 `pub mod` 声明，并在需要时调整导出策略。

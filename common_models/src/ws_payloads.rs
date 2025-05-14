@@ -54,6 +54,27 @@ pub struct UpdateTaskDebugNotePayload {
     pub group_id: String,
     /// 新的调试备注内容。
     pub new_note: String,
+    /// (新增) 可选的自定义共享数据，应为一个有效的JSON对象字符串在进入此结构前已被解析为 Value。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_shared_data: Option<serde_json::Value>,
+}
+
+/// (新增) 消息类型: 用于客户端请求更新 TaskDebugState 中的 custom_shared_data 字段。
+pub const UPDATE_CUSTOM_SHARED_DATA_MESSAGE_TYPE: &str = "UpdateCustomSharedData";
+
+/// (新增) Payload: 用于客户端发送要更新到 TaskDebugState.custom_shared_data 的内容。
+/// 客户端应发送一个有效的 JSON 对象。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct UpdateCustomSharedDataPayload {
+    /// 新的 custom_shared_data 内容，应为一个 JSON 对象。
+    pub new_data: serde_json::Value,
+}
+
+/// 通用响应 Payload，用于许多Tauri命令的成功/失败结果。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GeneralResponse {
+    pub success: bool,
+    pub message: String,
 }
 
 /// 业务操作Payload的枚举。

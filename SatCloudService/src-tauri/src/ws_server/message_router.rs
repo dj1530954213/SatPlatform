@@ -571,34 +571,112 @@ pub async fn handle_message(
         // 分支 P4.2.1: 处理 "UpdateTaskDebugNoteCommand" (更新任务调试备注) 类型的消息
         ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE => {
             info!(
-                "[消息路由] 客户端 {} (地址: {}): 正在处理 {} 请求。",
+                "[消息路由] 客户端 {} (地址: {})：正在处理 {} 请求。",
                 client_session.client_id, client_session.addr, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE
             );
-            let (group_id_clone, client_role_clone) = 
-                if let (Some(gid), role) = (client_session.group_id.read().await.as_ref(), *client_session.role.read().await) {
-                    if role != common_models::enums::ClientRole::Unknown { (gid.clone(), role) } else { send_unregistered_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE).await; return Ok(()); }
-                } else { send_unregistered_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE).await; return Ok(()); };
+            // 检查客户端是否已注册到某个组
+            let group_id_lock = client_session.group_id.read().await;
+            if let Some(group_id) = group_id_lock.as_ref() {
+                // 客户端已在组内，可以处理业务消息
+                let role_lock = client_session.role.read().await;
+                // 将原始消息的 payload (已经是 serde_json::Value) 直接传递
+                // 注意: task_state_manager.process_business_message 期望 payload 是 serde_json::Value
+                // 我们在 WsMessage 定义中 payload 就是 serde_json::Value (如果 WsMessage<T> 泛型 T 是 Value)
+                // 但如果 WsMessage 定义的 payload 是 String，则需要先解析 message.payload 为 serde_json::Value
+                // 假设 WsMessage.payload 已经是 serde_json::Value 或可以轻易转换
+                let payload_value_for_state_manager = match serde_json::from_str::<serde_json::Value>(&message.payload) {
+                    Ok(val) => val, // 如果原始 payload 是 string, 则解析为 Value
+                    Err(_) => {
+                        // 如果原始 payload 不是有效的 JSON string (不太可能，因为 WsMessage 通常设计为承载 JSON string 或已解析的 Value)
+                        // 或者如果 WsMessage.payload 本身就是 Value，则 message.payload.clone() 即可
+                        // 为了安全，我们先假设 WsMessage.payload 是 String，尝试解析
+                        // 如果WsMessage<P>中的P已经是serde_json::Value,那么直接用 message.payload.clone()
+                        // 查阅 rust_websocket_utils::message::WsMessage 定义，它通常是 WsMessage<String> 或 WsMessage<Value>
+                        // 假设是 WsMessage<String>，需要从 string 解析
+                        // 如果是 WsMessage<serde_json::Value>，那下面这行直接用 message.payload.clone()
+                         warn!(
+                            "[消息路由] 客户端 {}：{} 的 payload 不是有效的JSON字符串: '{}'。但仍尝试将其作为原始文本处理，如果下游需要Value则可能失败。", 
+                            client_session.client_id, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, message.payload
+                        );
+                        // 如果无法解析为 Value，则应报错。但 TaskManager 的 process_business_message 需要 Value.
+                        // 这里的 message.payload 是 String, 我们需要将其转换为 serde_json::Value
+                        // 而 process_business_message 内部又会从这个 Value 反序列化为 UpdateTaskDebugNotePayload
+                        // 所以，这里我们应该先将 message.payload (String) 解析为 UpdateTaskDebugNotePayload
+                        // 然后再将其序列化回 serde_json::Value 传递给 process_business_message。
+                        // 或者，修改 process_business_message 让其直接接受强类型 Payload (更好)
+                        // 但根据当前 process_business_message 的签名，它接收 serde_json::Value。
+                        // 所以，我们在这里解析成 UpdateTaskDebugNotePayload，再转回 Value。
+                        match serde_json::from_str::<UpdateTaskDebugNotePayload>(&message.payload) {
+                            Ok(specific_payload) => {
+                                match serde_json::to_value(specific_payload) {
+                                    Ok(val) => val,
+                                    Err(e_ser) => {
+                                        send_payload_parse_error(
+                                            &client_session, 
+                                            ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, 
+                                            &format!("Failed to re-serialize parsed payload: {}", e_ser),
+                                            &message.payload
+                                        ).await;
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e_de) => {
+                                send_payload_parse_error(
+                                    &client_session, 
+                                    ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, 
+                                    &e_de.to_string(),
+                                    &message.payload
+                                ).await;
+                                return Ok(()); // 结束处理此消息
+                            }
+                        }
+                    }
+                };
 
-            match serde_json::from_str::<common_models::ws_payloads::UpdateTaskDebugNotePayload>(&message.payload) {
-                Ok(parsed_payload) => {
-                    debug!(
-                        "[消息路由] 客户端 {}: UpdateTaskDebugNotePayload 解析成功: {:?}",
-                        client_session.client_id, parsed_payload
-                    );
-                    let action_payload = common_models::ws_payloads::BusinessActionPayload::UpdateTaskDebugNote(parsed_payload);
-                    process_business_action_and_notify_partners(
-                        &client_session,
-                        &group_id_clone,
-                        client_role_clone,
-                        action_payload,
-                        &task_state_manager,
-                        &connection_manager,
-                        ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE
-                    ).await;
+                match task_state_manager.process_business_message(
+                    group_id, // &str
+                    ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, // &str
+                    payload_value_for_state_manager, // serde_json::Value
+                    role_lock.clone(), // ClientRole
+                    &client_session.client_id.to_string(), // &str
+                    connection_manager.clone(), // Arc<ConnectionManager>
+                )
+                .await
+                {
+                    Ok(_) => {
+                        info!(
+                            "[消息路由] 客户端 {}：业务消息 '{}' 已成功由 TaskStateManager 处理。",
+                            client_session.client_id, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE
+                        );
+                        // 通常，业务消息的直接响应由 TaskStateUpdate (如果状态改变) 隐式处理，
+                        // 或者如果需要特定的命令回执，则可以在此处发送。
+                        // 例如，如果 send_debug_note_from_site_cmd 需要一个 GenericResponse,
+                        // 那么这个成功信息应该由 TaskStateManager 或其调用的命令本身返回给客户端,
+                        // 而不是由 MessageRouter 在这里构造。但 Tauri 命令直接返回了 GenericResponse。
+                        // 这里的日志是针对云端内部处理的。
+                    }
+                    Err(e) => {
+                        error!(
+                            "[消息路由] 客户端 {}：TaskStateManager 在处理业务消息 '{}' 时发生错误: {}.",
+                            client_session.client_id, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, e
+                        );
+                        // 可以向客户端发送一个更通用的业务处理错误消息
+                        send_error_response(
+                            &client_session,
+                            Some(ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE.to_string()),
+                            format!("处理业务消息时服务端发生内部错误: {}", e),
+                        )
+                        .await;
+                    }
                 }
-                Err(e) => {
-                    send_payload_parse_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE, &e.to_string(), &message.payload).await;
-                }
+            } else {
+                // 如果客户端未在任何组中，则不能处理此类业务消息
+                warn!(
+                    "[消息路由] 客户端 {} (地址: {})：尝试在未注册到任何组的情况下发送业务消息 '{}'。",
+                    client_session.client_id, client_session.addr, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE
+                );
+                send_unregistered_error(&client_session, ws_payloads::UPDATE_TASK_DEBUG_NOTE_MESSAGE_TYPE).await;
             }
         }
 
