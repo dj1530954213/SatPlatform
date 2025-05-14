@@ -1,6 +1,8 @@
 // TypeScript 模型定义，用于描述从 Tauri Rust 后端通过事件传递到 Angular 前端的各种负载 (payload) 结构。
 // 这些接口确保了前端在处理事件数据时的类型安全。
 
+import { TaskDebugState } from './task-debug-state.model';
+
 /**
  * @description WebSocket 连接状态事件的负载接口。
  *              当 `WS_CONNECTION_STATUS_EVENT` 事件被触发时，其 payload 应符合此结构。
@@ -89,7 +91,7 @@ export interface LocalTaskStateUpdatedEventPayload {
    *              其具体结构定义在 `common_models` crate 中，并在 Rust 后端序列化为 JSON 后传递。
    *              前端接收时，此字段为该 JSON 对象。
    */
-  new_state: any; // 在 TypeScript 中通常使用 any 或更具体的接口（如果为 TaskDebugState 创建了对应模型）
+  new_state: TaskDebugState; // 在 TypeScript 中通常使用 any 或更具体的接口（如果为 TaskDebugState 创建了对应模型）
 }
 
 /**
