@@ -1,64 +1,57 @@
-//! `SatControlCenter` (卫星控制中心) 应用的核心库入口模块。
+//! `SatOnSiteMobile` 现场端移动应用的核心库入口点。
 //!
-//! 本模块 (`lib.rs`) 作为 `SatControlCenter` 这个 crate (包) 的根模块，主要承担以下职责：
-//! - **模块组织与声明**: 声明并组织构成本应用核心逻辑的所有子模块。
-//!   每个子模块都封装了特定的功能领域，例如：
-//!   - `api_client`: (预期功能) 与外部 HTTP API 服务进行交互的客户端逻辑。
-//!   - `commands`: 定义所有可供前端调用的 Tauri 后端命令。
-//!   - `config`: 应用配置的加载、管理和持久化。
-//!   - `error`: 定义应用专属的错误类型。
-//!   - `event`: 定义用于后端与前端通信的 Tauri 事件。
-//!   - `plc_comms`: (预期功能) 与 PLC (可编程逻辑控制器) 设备进行通信的逻辑。
-//!   - `state`: (预期功能) 管理应用级别的共享状态。
-//!   - `ws_client`: 封装与云端服务进行 WebSocket 通信的客户端逻辑。
-//! - **应用启动逻辑 (特定场景)**: 包含一个 `run()` 公开函数。此函数主要用于在特定构建配置
-//!   (例如，当 `SatControlCenter` 被编译为移动端应用，由 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` 属性指明时)
-//!   作为应用的入口点来启动 Tauri 应用实例。在标准的桌面应用场景下，`main.rs` 中的 `main()` 函数通常是主入口。
-//!   在 `run()` 函数内部，会进行 Tauri 应用的构建，包括插件的初始化 (如 `tauri_plugin_log`)。
+//! 本文件通常用于定义库的公共接口（如果适用）和组织内部模块。
+//! 对于 Tauri 应用，`main.rs` 中的 `main()` 函数是主要的执行入口，
+//! 而 `lib.rs` 的角色可能更多是作为模块的集合点，或者在某些构建配置下（例如移动端）作为入口。
 
-pub mod api_client;
-pub mod commands;
-pub mod config;
-pub mod error;
-pub mod event;
-pub mod plc_comms;
-pub mod state;
-pub mod ws_client;
+// --- 公开模块声明 --- 
+// 这些模块共同构成了现场端应用的核心功能。
+pub mod api_client;      // 与外部 API（非 WebSocket）交互的客户端逻辑（如果需要）。
+pub mod commands;        // 定义所有可由前端通过 Tauri `invoke` 调用的 Rust 函数。
+pub mod config;          // 应用配置加载与管理。
+pub mod device_comms;    // 与具体硬件设备通信的逻辑（例如通过串口、蓝牙等）。
+pub mod error;           // 定义应用级别的错误类型和处理机制。
+pub mod event;           // 定义后端与前端之间通过 Tauri 事件系统传递的事件及其负载结构。
+pub mod mobile_specific; // 包含特定于移动平台的功能或适配代码。
+pub mod state;           // 定义和管理应用级别的共享状态（除了 Tauri 的托管状态）。
+pub mod ws_client;       // WebSocket 客户端服务，负责与云端进行 WebSocket 通信。
 
-/// Tauri 移动端入口点属性。
-/// 此 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` 属性是一个条件编译属性。
-/// 它表示：仅当编译目标为 `mobile` (移动端平台，例如通过 `tauri android build` 或 `tauri ios build` 命令构建时)
-/// 被激活时，下面的 `run` 函数才会被标记为 Tauri 的移动端应用入口点。
-/// 对于非移动端构建 (例如标准的桌面应用构建)，此属性无效，`main.rs` 中的 `main()` 函数将作为主入口。
+/// Tauri 移动端入口点函数。
+///
+/// 此函数通过 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` 宏标记，
+/// 表明在编译为移动端应用时，它将作为应用的起始执行点。
+///
+/// **注意**: 对于桌面端应用，`main.rs` 中的 `main()` 函数是实际的入口。
+/// 此 `run()` 函数的逻辑应与 `main.rs` 中的 `main()` 函数保持一致或进行适当调整，
+/// 以确保应用在不同平台上的行为符合预期，特别是关于应用构建和插件初始化的部分。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-/// `SatControlCenter` (卫星控制中心) 应用的备用/特定场景启动函数。
-///
-/// 此函数主要设计用于以下情况：
-/// - 当 `SatControlCenter` 被编译为针对移动端平台 (Android, iOS) 的应用时，
-///   它将通过 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` 属性被指定为应用的入口点。
-/// - 如果 `SatControlCenter` 未来被设计为一个可以作为 Tauri 插件被其他 Tauri 应用集成时，
-///   此 `run` 函数也可能作为插件初始化或启动其核心服务的入口。
-///
-/// 函数内部的逻辑包括：
-/// 1.  使用 `tauri::Builder::default()` 创建一个 Tauri 应用构建器。
-/// 2.  在 `setup` 钩子中，有条件地 (仅在 `debug_assertions` (调试断言) 开启时，即通常在开发和调试构建中)
-///     初始化并注册 `tauri_plugin_log` 插件。此插件提供了将 Rust 后端的 `log` crate 产生的日志
-///     桥接到前端开发者控制台或特定日志文件的能力，便于调试。
-///     日志级别被设置为 `log::LevelFilter::Info`，意味着 Info 及以上级别 (Info, Warn, Error) 的日志将被处理。
-/// 3.  调用 `.run(tauri::generate_context!())` 来最终构建并运行 Tauri 应用实例。
-/// 4.  如果应用运行过程中发生无法恢复的错误导致启动失败，则通过 `.expect(...)` 抛出一个 panic (程序恐慌)。
 pub fn run() {
+  // 在标准的 Tauri 应用结构中，日志初始化、Tauri Builder 的配置、
+  // 命令注册、setup 钩子以及 .run() 调用主要在 main.rs 中完成。
+  // 此处的 run 函数是为了满足 tauri::mobile_entry_point 的要求。
+  // 如果 main.rs 中的逻辑需要在此处复用或有特定于移动端的初始化，
+  // 则应将相关代码移至此处或共享的辅助函数中。
+
+  // 示例：构建并运行一个基本的 Tauri 应用实例。
+  // 实际应用中，这里的配置应与 main.rs 中的 tauri::Builder 配置对齐。
   tauri::Builder::default()
-    .setup(|app| {
-      if cfg!(debug_assertions) {
-        app.handle().plugin(
-          tauri_plugin_log::Builder::default()
-            .level(log::LevelFilter::Info)
-            .build(),
-        )?;
-      }
+    .setup(|_app| {
+      // 日志初始化已在 main.rs 中通过 env_logger 完成。
+      // 如果需要为移动端平台配置特定的日志插件（例如 tauri_plugin_log），
+      // 可以在此处进行初始化。
+      // 例如：
+      // if cfg!(debug_assertions) {
+      //   _app.handle().plugin(
+      //     tauri_plugin_log::Builder::default()
+      //       .level(log::LevelFilter::Info) // 设置日志级别
+      //       .build(),
+      //   )?;
+      //   log::info!("[现场端 lib.rs] tauri_plugin_log (移动端日志插件) 已初始化。");
+      // }
+      log::info!("[现场端 lib.rs] setup 钩子执行。主要的应用初始化逻辑在 main.rs 中。");
       Ok(())
     })
-    .run(tauri::generate_context!())
-    .expect("启动 SatControlCenter Tauri 应用时发生严重错误，无法继续运行。");
+    // .invoke_handler(...) // 如果移动端需要不同的命令集，可以在此配置
+    .run(tauri::generate_context!()) // 使用 tauri.conf.json 生成的上下文
+    .expect("运行 Tauri 移动应用时发生错误，请检查配置和日志。");
 }

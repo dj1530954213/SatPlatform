@@ -1,6 +1,6 @@
 // SatControlCenter/src-tauri/src/ws_client/service.rs
 
-//! `SatControlCenter` (控制中心) 应用的 WebSocket 客户端服务模块。
+//! `SatControlCenter` (中心端) 应用的 WebSocket 客户端服务模块。
 //!
 //! 该模块负责管理与云端 `SatCloudService` 的 WebSocket 连接，
 //! 包括连接建立、断开、消息收发、状态同步以及心跳维持。
@@ -9,7 +9,8 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use rust_websocket_utils::client::transport;
 use rust_websocket_utils::client::transport::ClientWsStream;
-// use rust_websocket_utils::message::WsMessage;
+use rust_websocket_utils::error::WsError;
+use rust_websocket_utils::message::WsMessage;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{RwLock};
 use tokio::sync::Mutex as TokioMutex;
@@ -20,17 +21,14 @@ use futures_util::SinkExt;
 use chrono::{Utc, DateTime};
 use std::time::Duration;
 use uuid::Uuid;
-use rust_websocket_utils::message::WsMessage;
 
-// 注意：这里的事件导入需要确保与 SatControlCenter/src-tauri/src/event.rs 中的定义一致
 use crate::event::{
     WS_CONNECTION_STATUS_EVENT, WsConnectionStatusEvent, ECHO_RESPONSE_EVENT, EchoResponseEventPayload,
     WS_REGISTRATION_STATUS_EVENT, WsRegistrationStatusEventPayload,
     WS_PARTNER_STATUS_EVENT, WsPartnerStatusEventPayload,
     LOCAL_TASK_STATE_UPDATED_EVENT, LocalTaskStateUpdatedEventPayload,
-    // WS_SERVER_ERROR_EVENT, WsServerErrorEventPayload, // 如果需要处理服务器错误，需要定义这个事件
+    WS_SERVER_ERROR_EVENT, WsServerErrorEventPayload,
 };
-// 注意：这里的 common_models 导入应该不需要更改
 use common_models::{
     self,
     ws_payloads::{
@@ -38,8 +36,8 @@ use common_models::{
         REGISTER_RESPONSE_MESSAGE_TYPE, RegisterResponsePayload,
         PARTNER_STATUS_UPDATE_MESSAGE_TYPE, PartnerStatusPayload,
         TASK_STATE_UPDATE_MESSAGE_TYPE,
-        ECHO_MESSAGE_TYPE, // Assuming EchoPayload is constructed elsewhere
-        // ERROR_RESPONSE_MESSAGE_TYPE, ErrorResponsePayload, // Removed unused imports
+        ERROR_RESPONSE_MESSAGE_TYPE, ErrorResponsePayload,
+        ECHO_MESSAGE_TYPE, EchoPayload,
     },
     TaskDebugState,
 };
@@ -108,8 +106,7 @@ impl WebSocketClientService {
     ///
     /// 返回一个新的 `WebSocketClientService` 实例。
     pub fn new(app_handle: AppHandle) -> Self {
-        // **日志标识符已更改**
-        info!("[SatControlCenter] WebSocketClientService: 正在初始化..."); 
+        info!("[SatControlCenter] WebSocketClientService: 正在初始化...");
         Self {
             ws_send_channel: Arc::new(TokioMutex::new(None)),
             cloud_assigned_client_id: Arc::new(RwLock::new(None)),
@@ -136,7 +133,6 @@ impl WebSocketClientService {
     ///   如果 URL 无效或在启动连接任务时发生即时错误，则返回 `Err(String)`。
     ///   注意：实际的连接成功或失败将通过 `WS_CONNECTION_STATUS_EVENT` 事件异步通知。
     pub async fn connect(&self, url_str: &str) -> Result<(), String> {
-        // **日志标识符已更改**
         info!("[SatControlCenter] WebSocketClientService::connect 调用，目标 URL: {}", url_str);
 
         // 克隆需要在新任务中使用的 Arc 引用
@@ -153,18 +149,13 @@ impl WebSocketClientService {
         // 如果当前已有连接任务在运行，先尝试取消它
         let mut conn_task_guard = connection_task_handle_clone.lock().await;
         if let Some(handle) = conn_task_guard.take() {
-            // **日志标识符已更改**
             info!("[SatControlCenter] 检测到之前的连接任务正在运行，正在尝试取消...");
             handle.abort(); // 请求取消任务
             match handle.await { // 等待任务结束（即使是被取消的）
-                // **日志标识符已更改**
                 Ok(_) => info!("[SatControlCenter] 之前的连接任务已成功取消或完成。"),
-                // **日志标识符已更改**
                 Err(e) if e.is_cancelled() => info!("[SatControlCenter] 之前的连接任务已被取消。"),
-                // **日志标识符已更改**
                 Err(e) => warn!("[SatControlCenter] 等待之前的连接任务结束时发生错误: {:?}", e),
             }
-            // **日志标识符已更改**
             info!("[SatControlCenter] 已清理之前的连接任务句柄。");
             // 清理相关状态
             *is_connected_status_clone.write().await = false;
@@ -174,9 +165,7 @@ impl WebSocketClientService {
             let mut hb_task_guard = heartbeat_task_handle_clone.lock().await;
             if let Some(hb_handle) = hb_task_guard.take() {
                  hb_handle.abort();
-                 // **日志标识符已更改**
                  info!("[SatControlCenter] 已请求取消相关的心跳任务。");
-                 // 不必 await 心跳任务的结束，因为它应该很快响应 abort
             }
             *last_pong_received_at_clone.write().await = None;
         }
@@ -189,29 +178,23 @@ impl WebSocketClientService {
             let mut heartbeat_join_handle: Option<tokio::task::JoinHandle<()>> = None;
 
             // --- 连接阶段 ---
-            // **日志标识符已更改**
             info!("[SatControlCenter] (连接任务) 开始尝试连接到: {}", url_string);
             match transport::connect_client(url_string.clone()).await {
                 Ok(mut client_connection) => {
-                    // **日志标识符已更改**
                     info!("[SatControlCenter] (连接任务) 连接成功建立。");
                     connection_attempt_successful = true;
 
                     // --- 连接成功后的处理 (原 handle_on_open 逻辑) ---
                     *is_connected_status_clone.write().await = true;
-                    // cloud_assigned_client_id 在注册响应后更新
                     *last_pong_received_at_clone.write().await = Some(Utc::now());
 
                     // 发送连接成功事件
-                    // **确保 WsConnectionStatusEvent 在 SatControlCenter 的 event.rs 中定义正确**
-        let event_payload = WsConnectionStatusEvent {
-            connected: true,
+                    let event_payload = WsConnectionStatusEvent {
+                        connected: true,
                         error_message: Some("成功连接到云端WebSocket服务".to_string()),
-                        client_id: None, // 在 RegisterResponse 后才确定
+                        client_id: None, 
                     };
-                    // **确保 WS_CONNECTION_STATUS_EVENT 常量在 SatControlCenter 的 event.rs 中定义正确**
-                    if let Err(e) = app_handle_clone.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-                        // **日志标识符已更改**
+                    if let Err(e) = app_handle_clone.emit(WS_CONNECTION_STATUS_EVENT, &event_payload) {
                         error!(
                             "[SatControlCenter] (连接任务) 发送 \"已连接\" 事件 ({}) 失败: {}", 
                             WS_CONNECTION_STATUS_EVENT, e
@@ -228,152 +211,160 @@ impl WebSocketClientService {
                     let hb_is_connected = is_connected_status_clone.clone();
                     let hb_cloud_id = cloud_assigned_client_id_clone.clone();
                     let hb_task = tokio::spawn(async move {
-                        // 调用静态方法运行心跳循环
                         Self::run_heartbeat_loop(
                             hb_app_handle,
                             hb_ws_send,
                             hb_last_pong,
                             hb_is_connected,
                             hb_cloud_id,
-        ).await;
+                        ).await;
                     });
                     heartbeat_join_handle = Some(hb_task);
 
                     // --- 消息接收循环 ---
+                    info!("[SatControlCenter] (连接任务) WebSocket 消息接收流 (Stream) 已启动。");
                     loop {
                         tokio::select! {
-                            // 接收消息
-                            // 使用 rust_websocket_utils 提供的辅助函数接收和解析消息
                             maybe_msg_result = transport::receive_message(&mut client_connection.ws_receiver) => {
                                 match maybe_msg_result {
-                                    Some(Ok(ws_msg)) => {
-                                        // --- 处理收到的消息 (原 handle_on_message 逻辑) ---
-                                         // 调用静态方法处理消息
-                                         Self::process_received_message(
-                                             &app_handle_clone,
-                                             ws_msg,
-                                             &cloud_assigned_client_id_clone, // 注意传递的是克隆的 Arc 引用
-                                             &last_pong_received_at_clone,
-                                             &local_task_state_cache_clone,
-                                         ).await;
+                                    Some(Ok(ws_msg)) => { // ws_msg is now correctly WsMessage
+                                        Self::process_received_message(
+                                            &app_handle_clone,
+                                            ws_msg, 
+                                            &cloud_assigned_client_id_clone,
+                                            &last_pong_received_at_clone,
+                                            &local_task_state_cache_clone,
+                                        ).await;
                                     }
                                     Some(Err(e)) => {
-                                        // --- 处理接收或解析错误 (原 handle_on_error 部分逻辑) ---
-                                        // **日志标识符已更改**
-                                        error!("[SatControlCenter] (连接任务) 消息接收或解析时发生错误: {}", e);
-                                        final_error_message = Some(format!("接收消息时出错: {}", e));
-                                        break; // 发生错误，退出接收循环
+                                        // Errors from transport::receive_message are WsUtilError
+                                        match e {
+                                            WsError::WebSocketProtocolError(ws_err) => {
+                                                match ws_err {
+                                                    tokio_tungstenite::tungstenite::Error::ConnectionClosed => {
+                                                        warn!("[SatControlCenter] (连接任务) WebSocket 连接已由对方关闭 (via Tungstenite Error)。");
+                                                        final_error_message = Some("WebSocket 连接已由对方关闭".to_string());
+                                                        break;
+                                                    }
+                                                    tokio_tungstenite::tungstenite::Error::Protocol(protocol_err) => {
+                                                        warn!("[SatControlCenter] (连接任务) WebSocket 协议错误 (例如收到Close帧): {:?}", protocol_err);
+                                                        final_error_message = Some(format!("WebSocket 协议错误: {:?}", protocol_err));
+                                                        break;
+                                                    }
+                                                    other_tungstenite_err => {
+                                                        error!("[SatControlCenter] (连接任务) 接收消息时发生 Tungstenite 错误: {:?}", other_tungstenite_err);
+                                                        final_error_message = Some(format!("接收消息时发生 Tungstenite 错误: {:?}", other_tungstenite_err));
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            WsError::DeserializationError(de_err) => {
+                                                error!("[SatControlCenter] (连接任务) JSON (反)序列化错误: {:?}", de_err);
+                                            }
+                                            WsError::IoError(io_err) => {
+                                                error!("[SatControlCenter] (连接任务) IO 错误: {:?}", io_err);
+                                                final_error_message = Some(format!("IO 错误: {:?}", io_err));
+                                                break;
+                                            }
+                                            _other_ws_util_err => { 
+                                                error!("[SatControlCenter] (连接任务) 接收消息时发生未处理的 WsUtilError: {:?}", _other_ws_util_err);
+                                                final_error_message = Some(format!("接收消息时发生未处理的库错误: {:?}", _other_ws_util_err));
+                                                break; 
+                                            }
+                                        }
                                     }
-                                    None => {
-                                        // --- 连接已关闭 (原 handle_on_close 逻辑) ---
-                                        // **日志标识符已更改**
-                                        info!("[SatControlCenter] (连接任务) WebSocket 连接已由对端关闭。");
-                                        final_error_message = Some("连接已由对端关闭".to_string());
-                                        break; // 连接关闭，退出接收循环
+                                    None => { // Stream ended, typically means connection closed by peer
+                                        info!("[SatControlCenter] (连接任务) WebSocket 连接流已结束 (可能由对方关闭)。");
+                                        final_error_message = final_error_message.or(Some("WebSocket 连接已由对方关闭".to_string()));
+                                        break; 
                                     }
                                 }
                             }
-                            // 检查外部断开信号 (通过 is_connected_status 标志)
-                            _ = async {
-                                 loop {
-                                     // 短暂休眠避免忙等待
-                                     tokio::time::sleep(Duration::from_millis(500)).await;
-                                     // 检查连接状态标志
-                                     if !*is_connected_status_clone.read().await {
-                                         break; // 如果状态变为 false，退出等待
-                                     }
-                                 }
-                            } => {
-                                 // **日志标识符已更改**
-                                 info!("[SatControlCenter] (连接任务) 检测到连接状态变为 false，主动退出任务。");
-                                 // 设置错误消息，除非已有更具体的错误
-                                 final_error_message = final_error_message.or_else(|| Some("连接被主动断开".to_string()));
-                                 break; // 退出 select 循环
-                            }
+                            // Optional: Add a branch to select! for checking self.is_connected_status if manual disconnect is to break this loop
+                            // _ = async { ... } => { ... break; }
                         }
                     }
+                    // info!("[SatControlCenter] (连接任务) 已退出消息接收循环。"); // This log might be inside the loop in some logic branches
                 }
                 Err(e) => {
-                    // --- 处理连接错误 (原 handle_on_error 部分逻辑) ---
-                    // **日志标识符已更改**
-                    error!("[SatControlCenter] (连接任务) 连接到 {} 失败: {}", url_string, e);
-                    final_error_message = Some(format!("连接失败: {}", e));
-                    // 连接失败，connection_attempt_successful 保持 false
+                    error!("[SatControlCenter] (连接任务) 连接到 WebSocket 服务器失败: {:?}", e);
+                    final_error_message = Some(format!("连接到 WebSocket 服务器失败: {}", e.to_string()));
+                    // connection_attempt_successful 保持 false
                 }
             }
 
-            // --- 清理阶段 (无论连接成功与否，或循环退出原因) ---
-            // **日志标识符已更改**
-            info!("[SatControlCenter] (连接任务) 进入清理阶段...");
+            // --- 连接结束后的清理与通知 ---
+            info!("[SatControlCenter] (连接任务) 进入连接结束处理阶段。");
 
-            // 停止心跳任务 (如果已启动)
-            if let Some(hb_handle) = heartbeat_join_handle {
-                // **日志标识符已更改**
+            // 停止心跳任务 (如果它正在运行)
+            if let Some(hb_handle) = heartbeat_join_handle.take() {
                 info!("[SatControlCenter] (连接任务) 正在停止心跳任务...");
                 hb_handle.abort();
-                // 可以选择 await，但通常 abort 即可
-                 // 清理主服务中存储的心跳任务句柄
-                 let mut hb_guard = heartbeat_task_handle_clone.lock().await;
-                 if hb_guard.is_some() { *hb_guard = None; } 
+                match hb_handle.await {
+                    Ok(_) => info!("[SatControlCenter] (连接任务) 心跳任务已成功中止或完成。"),
+                    Err(e) if e.is_cancelled() => info!("[SatControlCenter] (连接任务) 心跳任务已被取消。"),
+                    Err(e) => warn!("[SatControlCenter] (连接任务) 等待心跳任务结束时发生错误: {:?}", e),
+                }
             }
 
-            // 更新最终连接状态
-            let was_connected = *is_connected_status_clone.read().await; // 记录断开前的状态
+            // 更新连接状态
+            let was_connected = *is_connected_status_clone.read().await;
             *is_connected_status_clone.write().await = false;
-            *cloud_assigned_client_id_clone.write().await = None;
-            *ws_send_channel_clone.lock().await = None;
-            *last_pong_received_at_clone.write().await = None;
-            // 注意：local_task_state_cache_clone 不需要在此处清除，可以保持最后的状态，直到下次成功注册
+            *ws_send_channel_clone.lock().await = None; // 清理发送通道
+            *cloud_assigned_client_id_clone.write().await = None; // 清理 client_id
+            *last_pong_received_at_clone.write().await = None; // 清理 pong 时间戳
 
-            // 发送最终的连接状态事件 (只有在从未成功连接过，或者之前是连接状态时才发送)
-            if !connection_attempt_successful || was_connected {
-                // **确保 WsConnectionStatusEvent 定义正确**
+            // 根据情况发送连接状态事件
+            if connection_attempt_successful && was_connected { // 如果之前连接成功，现在断开了
+                info!("[SatControlCenter] (连接任务) 连接已断开。发送断开事件。");
                 let event_payload = WsConnectionStatusEvent {
                     connected: false,
-                    // 提供最终的错误信息，或者默认的关闭信息
-                    error_message: final_error_message.or_else(|| Some("连接已关闭".to_string())), 
-                    client_id: None, // 断开时通常不需要发送 client_id
+                    error_message: final_error_message.or(Some("WebSocket 连接已断开".to_string())),
+                    client_id: None, // 断开时 client_id 通常已无效或不需要
                 };
-                // **确保 WS_CONNECTION_STATUS_EVENT 常量定义正确**
-                if let Err(e) = app_handle_clone.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-                    // **日志标识符已更改**
+                if let Err(e) = app_handle_clone.emit(WS_CONNECTION_STATUS_EVENT, &event_payload) {
                     error!(
-                        "[SatControlCenter] (连接任务-清理) 发送 \"连接关闭/失败\" 事件 ({}) 失败: {}",
+                        "[SatControlCenter] (连接任务) 发送 \"已断开\" 事件 ({}) 失败: {}",
+                        WS_CONNECTION_STATUS_EVENT, e
+                    );
+                }
+            } else if !connection_attempt_successful { // 如果连接尝试一开始就失败了
+                info!("[SatControlCenter] (连接任务) 连接尝试失败。发送失败事件。");
+                let event_payload = WsConnectionStatusEvent {
+                    connected: false,
+                    error_message: final_error_message.or(Some("连接 WebSocket 失败，请检查网络或URL。".to_string())),
+                    client_id: None,
+                };
+                if let Err(e) = app_handle_clone.emit(WS_CONNECTION_STATUS_EVENT, &event_payload) {
+                    error!(
+                        "[SatControlCenter] (连接任务) 发送 \"连接失败\" 事件 ({}) 失败: {}",
                         WS_CONNECTION_STATUS_EVENT, e
                     );
                 }
             }
+            // 如果 connection_attempt_successful 为 true 但 was_connected 为 false，
+            // 这意味着 on_open 逻辑中已发送过连接成功事件，这里不需要重复发送失败或断开。
 
-            // 从主服务中移除当前连接任务的任务句柄 (表示任务已结束)
-            let mut task_guard = connection_task_handle_clone.lock().await;
-            // 可以通过比较 JoinHandle 的 id 来确保移除的是正确的任务句柄，但 JoinHandle 不直接暴露 ID。
-            // 假设我们总是先取消旧任务再启动新任务，所以这里的 None 检查足够。
-             if task_guard.is_some() {
-                 *task_guard = None; // 移除句柄
-                 // **日志标识符已更改**
-                 info!("[SatControlCenter] (连接任务) 已清理自身在主服务中的任务句柄。");
-             } else {
-                 // **日志标识符已更改**
-                 // 这可能发生在任务完成前，新的 connect 调用覆盖了句柄
-                 info!("[SatControlCenter] (连接任务) 自身任务句柄已不在主服务中，可能已被新连接任务覆盖。");
-             }
-
-
-            // **日志标识符已更改**
-            info!("[SatControlCenter] (连接任务) 已完成。");
+            info!("[SatControlCenter] (连接任务) 连接处理任务已结束。");
         });
 
-        // 存储新启动的连接任务的句柄
-        let mut task_guard = self.connection_task_handle.lock().await;
-        *task_guard = Some(connection_task);
-        // **日志标识符已更改**
-        info!("[SatControlCenter] WebSocket 连接任务已成功启动并存储句柄。");
-
-        Ok(()) // 连接启动过程本身成功
+        // 存储新的连接任务句柄
+        *connection_task_handle_clone.lock().await = Some(connection_task);
+        info!("[SatControlCenter] WebSocketClientService::connect: 新的连接处理任务已启动。");
+        Ok(())
     }
 
-    /// 辅助函数：处理接收到的单个 WebSocket 消息。
-    /// 这是一个静态方法，因为它不直接修改 `self` 的状态，而是通过传入的 Arc 引用来操作。
+    /// 处理从 WebSocket 服务器接收到的消息。
+    ///
+    /// 此函数负责解析消息类型，反序列化 Payload，并根据消息内容
+    /// 执行相应的操作，如更新本地状态、发射 Tauri 事件通知前端等。
+    ///
+    /// # 参数
+    /// * `app_handle`: Tauri 应用句柄。
+    /// * `ws_msg`: 从服务器接收到的 `WsMessage`。
+    /// * `cloud_assigned_client_id_state`: 用于存储云端分配的 client_id 的状态。
+    /// * `last_pong_received_at_clone`: 用于更新最后收到 Pong 时间的状态。
+    /// * `local_task_state_cache_clone`: 用于更新本地任务状态缓存的状态。
     async fn process_received_message(
         app_handle: &AppHandle,
         ws_msg: WsMessage,
@@ -381,441 +372,451 @@ impl WebSocketClientService {
         last_pong_received_at_clone: &Arc<RwLock<Option<DateTime<Utc>>>>,
         local_task_state_cache_clone: &Arc<RwLock<Option<TaskDebugState>>>,
     ) {
-        // **日志标识符已更改**
-        // 增加 Payload 摘要日志
-        info!(
-            "[SatControlCenter] (处理消息) 类型='{}', 消息ID='{}', 时间戳='{}', Payload摘要='{}'", 
-            ws_msg.message_type, ws_msg.message_id, ws_msg.timestamp, ws_msg.payload.chars().take(100).collect::<String>()
-        ); 
+        debug!(
+            "[SatControlCenter] process_received_message: 收到消息类型 '{}'",
+            ws_msg.message_type
+        );
 
         match ws_msg.message_type.as_str() {
-            // 处理 Echo 消息（通常是服务器对客户端 Ping 的响应，或测试消息）
-            // 根据 common_models 定义的消息类型常量进行匹配
-            common_models::ws_payloads::ECHO_MESSAGE_TYPE => {
-                 // 尝试将 payload 解析为 EchoPayload
-                 match serde_json::from_str::<common_models::ws_payloads::EchoPayload>(&ws_msg.payload) {
+            ECHO_MESSAGE_TYPE => {
+                match serde_json::from_str::<EchoPayload>(&ws_msg.payload) {
                     Ok(echo_payload) => {
-                        // **日志标识符已更改**
-                        info!("[SatControlCenter] (处理消息) 成功解析 EchoPayload: {:?}", echo_payload);
-                        // 构建要发送给前端的事件 Payload
-                        // **确保 EchoResponseEventPayload 定义正确**
-                        let response_event_payload = EchoResponseEventPayload { content: echo_payload.content };
-                        // **确保 ECHO_RESPONSE_EVENT 常量定义正确**
-                        if let Err(e) = app_handle.emit_to("main", ECHO_RESPONSE_EVENT, &response_event_payload) {
-                             // **日志标识符已更改**
-                             error!("[SatControlCenter] (处理消息) 发送 Echo响应 ({}) 事件失败: {}", ECHO_RESPONSE_EVENT, e);
+                        info!(
+                            "[SatControlCenter] 收到 Echo 回复，内容: '{}'",
+                            echo_payload.content
+                        );
+                        let event_payload = EchoResponseEventPayload {
+                            content: echo_payload.content,
+                        };
+                        if let Err(e) = app_handle.emit(ECHO_RESPONSE_EVENT, &event_payload) {
+                            error!(
+                                "[SatControlCenter] 发送 EchoResponseEvent ({}) 失败: {}",
+                                ECHO_RESPONSE_EVENT, e
+                            );
                         }
                     }
                     Err(e) => {
-                        // **日志标识符已更改**
-                        error!("[SatControlCenter] (处理消息) 解析 EchoPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                        error!(
+                            "[SatControlCenter] 反序列化 EchoPayload 失败: {}, 原始 payload: {}",
+                            e, ws_msg.payload
+                        );
                     }
                 }
             }
-            // 处理 Pong 消息 (心跳响应)
-            PONG_MESSAGE_TYPE => {
-                // **日志标识符已更改**
-                info!("[SatControlCenter] (处理消息) 收到 Pong 消息。");
-                // 更新最后收到 Pong 的时间戳
-                *last_pong_received_at_clone.write().await = Some(Utc::now());
-            }
-            // 处理注册响应消息
             REGISTER_RESPONSE_MESSAGE_TYPE => {
-                // 尝试解析为 RegisterResponsePayload
                 match serde_json::from_str::<RegisterResponsePayload>(&ws_msg.payload) {
                     Ok(payload) => {
-                        // **日志标识符已更改**
-                        info!("[SatControlCenter] (处理消息) 收到并解析 RegisterResponsePayload: {:?}", payload);
-                        
-                        // 如果注册成功，存储云端分配的客户端 ID
-                        let mut assigned_id_str: Option<String> = None;
+                        info!(
+                            "[SatControlCenter] 收到 RegisterResponse: success={}, client_id={:?}, group_id={:?}, role={:?}, msg='{}'",
+                            payload.success,
+                            payload.assigned_client_id,
+                            payload.effective_group_id,
+                            payload.effective_role,
+                            payload.message.as_deref().unwrap_or("")
+                        );
                         if payload.success {
-                            let assigned_id = payload.assigned_client_id; // 是 Uuid 类型
-                            *cloud_assigned_client_id_state.write().await = Some(assigned_id);
-                            assigned_id_str = Some(assigned_id.to_string()); // 转换为字符串以匹配事件 Payload
-                            // **日志标识符已更改**
-                            info!("[SatControlCenter] (处理消息) 客户端注册成功，云端分配的客户端ID: {}", assigned_id);
-                        } else {
-                            // **日志标识符已更改**
-                            warn!("[SatControlCenter] (处理消息) 客户端注册失败。原因: {:?}", payload.message);
-                            // 注册失败，清除可能存在的旧 ID
-                            *cloud_assigned_client_id_state.write().await = None;
+                            *cloud_assigned_client_id_state.write().await = Some(payload.assigned_client_id);
+                            // 更新连接状态事件，包含 client_id
+                            let conn_event_payload = WsConnectionStatusEvent {
+                                connected: true,
+                                error_message: Some("客户端注册成功".to_string()),
+                                client_id: Some(payload.assigned_client_id.to_string()),
+                            };
+                            if let Err(e) = app_handle.emit(WS_CONNECTION_STATUS_EVENT, &conn_event_payload) {
+                                error!(
+                                    "[SatControlCenter] 发送包含 client_id 的 WsConnectionStatusEvent ({}) 失败: {}",
+                                    WS_CONNECTION_STATUS_EVENT, e
+                                );
+                            }
                         }
-
-                        // 构建要发送给前端的事件 Payload
-                        // **确保 WsRegistrationStatusEventPayload 定义正确**
-                        let event_payload = WsRegistrationStatusEventPayload {
+                        let reg_event_payload = WsRegistrationStatusEventPayload {
                             success: payload.success,
-                            message: payload.message.clone(),
-                            group_id: payload.effective_group_id.clone(), // common_models::RegisterResponsePayload.effective_group_id 是 Option<String>
-                            task_id: None, // 当前逻辑中 task_id 不通过 RegisterResponsePayload 传递，保持 None
-                            assigned_client_id: assigned_id_str, // 使用转换后的 Option<String>
+                            message: payload.message,
+                            assigned_client_id: Some(payload.assigned_client_id.to_string()),
+                            group_id: payload.effective_group_id,
+                            role: payload.effective_role.map(|r| r.to_string()),
+                            task_id: None,
                         };
-                        
-                        // 发送注册状态事件到前端
-                        // **确保 WS_REGISTRATION_STATUS_EVENT 常量定义正确**
-                        if let Err(e) = app_handle.emit_to("main", WS_REGISTRATION_STATUS_EVENT, &event_payload) {
-                            // **日志标识符已更改**
-                            error!("[SatControlCenter] (处理消息) 发送 WsRegistrationStatusEventPayload ({}) 事件失败: {}", WS_REGISTRATION_STATUS_EVENT, e);
+                        if let Err(e) = app_handle.emit(WS_REGISTRATION_STATUS_EVENT, &reg_event_payload) {
+                            error!(
+                                "[SatControlCenter] 发送 WsRegistrationStatusEvent ({}) 失败: {}",
+                                WS_REGISTRATION_STATUS_EVENT, e
+                            );
                         }
                     }
                     Err(e) => {
-                        // **日志标识符已更改**
-                        error!("[SatControlCenter] (处理消息) 解析 RegisterResponsePayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                        error!(
+                            "[SatControlCenter] 反序列化 RegisterResponsePayload 失败: {}, 原始 payload: {}",
+                            e, ws_msg.payload
+                        );
                     }
                 }
             }
-            // 处理伙伴状态更新消息
             PARTNER_STATUS_UPDATE_MESSAGE_TYPE => {
-                // 尝试解析为 PartnerStatusPayload
                 match serde_json::from_str::<PartnerStatusPayload>(&ws_msg.payload) {
                     Ok(payload) => {
-                        // **日志标识符已更改**
-                        info!("[SatControlCenter] (处理消息) 收到并解析 PartnerStatusPayload: {:?}", payload);
-                        // 构建事件 Payload 发送给前端
-                        // **确保 WsPartnerStatusEventPayload 定义正确**
-                        let event_payload = WsPartnerStatusEventPayload {
-                            // 注意：payload.partner_role 是 ClientRole 枚举，需要转换为字符串
-                            partner_role: payload.partner_role.to_string(), 
-                            is_online: payload.is_online,
-                            partner_client_id: Some(payload.partner_client_id.to_string()), // 新增：从云端 payload 获取
-                            group_id: Some(payload.group_id.clone()),                     // 新增：从云端 payload 获取
-                        };
-                        // **确保 WS_PARTNER_STATUS_EVENT 常量定义正确**
-                        if let Err(e) = app_handle.emit_to("main", WS_PARTNER_STATUS_EVENT, &event_payload) {
-                            // **日志标识符已更改**
-                            error!("[SatControlCenter] (处理消息) 发送 WsPartnerStatusEventPayload ({}) 事件失败: {}", WS_PARTNER_STATUS_EVENT, e);
-                        }
-                    }
-                    Err(e) => {
-                        // **日志标识符已更改**
-                        error!("[SatControlCenter] (处理消息) 解析 PartnerStatusPayload 失败: {}. 原始Payload: {}", e, ws_msg.payload);
-                    }
-                }
-            }
-            // 处理任务状态更新消息 (来自云端的权威状态)
-            TASK_STATE_UPDATE_MESSAGE_TYPE => {
-                // 尝试解析为 TaskDebugState
-                match serde_json::from_str::<TaskDebugState>(&ws_msg.payload) {
-                    Ok(new_state) => {
-                        // **日志标识符已更改**
-                        info!("[SatControlCenter] (处理消息) 收到并解析 TaskDebugState (任务ID: {}), 最后更新者: {:?}, 更新时间戳: {}", 
-                            new_state.task_id, new_state.last_updated_by_role, new_state.last_update_timestamp
+                        info!(
+                            "[SatControlCenter] 收到 PartnerStatusUpdate: group='{}', partner_role={:?}, client_id={}, online={}",
+                            payload.group_id, payload.partner_role, payload.partner_client_id, payload.is_online
                         );
-                        // 更新本地缓存的任务状态
-                        *local_task_state_cache_clone.write().await = Some(new_state.clone());
-                        
-                        // 构建事件 Payload 发送给前端
-                        // **确保 LocalTaskStateUpdatedEventPayload 定义正确**
-                        // 不再需要将 TaskDebugState 序列化为 serde_json::Value
-                        let event_payload = LocalTaskStateUpdatedEventPayload { new_state: new_state.clone() }; // 直接使用 new_state (TaskDebugState)
-                        // **确保 LOCAL_TASK_STATE_UPDATED_EVENT 常量定义正确**
-                        if let Err(e) = app_handle.emit_to("main", LOCAL_TASK_STATE_UPDATED_EVENT, &event_payload) {
-                            // **日志标识符已更改**
-                            error!("[SatControlCenter] (处理消息) 发送 LocalTaskStateUpdatedEventPayload ({}) 事件失败: {}", LOCAL_TASK_STATE_UPDATED_EVENT, e);
+                        let event_payload = WsPartnerStatusEventPayload {
+                            partner_role: payload.partner_role.to_string(),
+                            partner_client_id: Some(payload.partner_client_id.to_string()),
+                            is_online: payload.is_online,
+                            group_id: Some(payload.group_id),
+                        };
+                        if let Err(e) = app_handle.emit(WS_PARTNER_STATUS_EVENT, &event_payload) {
+                            error!(
+                                "[SatControlCenter] 发送 WsPartnerStatusEvent ({}) 失败: {}",
+                                WS_PARTNER_STATUS_EVENT, e
+                            );
                         }
                     }
                     Err(e) => {
-                        // **日志标识符已更改**
-                        error!("[SatControlCenter] (处理消息) 解析 TaskDebugState 失败: {}. 原始Payload: {}", e, ws_msg.payload);
+                        error!(
+                            "[SatControlCenter] 反序列化 PartnerStatusPayload 失败: {}, 原始 payload: {}",
+                            e, ws_msg.payload
+                        );
                     }
                 }
             }
-            // 处理未知或未实现的消息类型
+            TASK_STATE_UPDATE_MESSAGE_TYPE => {
+                match serde_json::from_str::<TaskDebugState>(&ws_msg.payload) {
+                    Ok(task_state) => {
+                        info!(
+                            "[SatControlCenter] 收到 TaskStateUpdate for task_id: {}, last_updated by {:?} at {:?}",
+                            task_state.task_id,
+                            task_state.last_updated_by_role,
+                            task_state.last_update_timestamp
+                        );
+                        *local_task_state_cache_clone.write().await = Some(task_state.clone());
+                        
+                        let event_payload = LocalTaskStateUpdatedEventPayload {
+                            new_state: task_state,
+                        };
+                        if let Err(e) = app_handle.emit(LOCAL_TASK_STATE_UPDATED_EVENT, &event_payload) {
+                            error!(
+                                "[SatControlCenter] 发送 LocalTaskStateUpdatedEvent ({}) 失败: {}",
+                                LOCAL_TASK_STATE_UPDATED_EVENT, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "[SatControlCenter] 反序列化 TaskDebugState (for TaskStateUpdate) 失败: {}, 原始 payload: {}",
+                            e, ws_msg.payload
+                        );
+                    }
+                }
+            }
+            PONG_MESSAGE_TYPE => {
+                debug!("[SatControlCenter] 收到 Pong 消息。");
+                *last_pong_received_at_clone.write().await = Some(Utc::now());
+            }
+            ERROR_RESPONSE_MESSAGE_TYPE => {
+                 match serde_json::from_str::<ErrorResponsePayload>(&ws_msg.payload) {
+                    Ok(payload) => {
+                        warn!(
+                            "[SatControlCenter] 收到来自云端的错误响应: message='{}', original_request_type='{:?}'",
+                            payload.error, payload.original_message_type
+                        );
+                        // TODO: 通过 Tauri 事件将此错误信息传递给前端，以便UI可以显示
+                        // 例如，可以定义一个新的 WsServerErrorEvent
+                        let error_event_payload = WsServerErrorEventPayload {
+                            error_message: payload.error,
+                            original_message_type: payload.original_message_type,
+                        };
+                        if let Err(e) = app_handle.emit(WS_SERVER_ERROR_EVENT, &error_event_payload) {
+                            error!(
+                                "[SatControlCenter] 发送 WsServerErrorEvent ({}) 失败: {}",
+                                WS_SERVER_ERROR_EVENT, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "[SatControlCenter] 反序列化 ErrorResponsePayload 失败: {}, 原始 payload: {}",
+                            e, ws_msg.payload
+                        );
+                    }
+                }
+            }
             unknown_type => {
-                // **日志标识符已更改**
-                warn!("[SatControlCenter] (处理消息) 收到未处理的 WebSocket 消息类型: '{}'", unknown_type);
+                warn!(
+                    "[SatControlCenter] 收到未知类型的 WebSocket 消息: '{}'. 忽略此消息. Payload: {}",
+                    unknown_type, ws_msg.payload
+                );
             }
         }
     }
 
-    /// 辅助函数：运行心跳循环。
-    /// 这是一个静态方法，在新连接建立后由 `connect` 中的任务 `tokio::spawn` 启动。
+    /// 心跳循环。
+    ///
+    /// 此异步函数在一个循环中运行，定期发送 Ping 消息到服务器，并检查是否超时未收到 Pong 回复。
+    /// 当 `is_connected_status_clone` 变为 `false` 时，或者当任务被取消时，循环会终止。
+    ///
+    /// # Arguments
+    /// * `app_handle`: Tauri 应用句柄 (当前未使用，但保留以备将来可能需要发送事件)。
+    /// * `ws_send_channel_clone`: WebSocket 发送通道。
+    /// * `last_pong_received_at_clone`: 最后收到 Pong 的时间戳。
+    /// * `is_connected_status_clone`: 当前连接状态。
+    /// * `_cloud_assigned_client_id_clone`: 客户端ID (当前未使用)。
     async fn run_heartbeat_loop(
-        app_handle: AppHandle, // 用于发送事件 (例如超时断开事件)
-        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>, // 发送 Ping
-        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>, // 检查 Pong 超时
-        is_connected_status_clone: Arc<RwLock<bool>>, // 检查连接状态，并在超时时设置为 false
-        _cloud_assigned_client_id_clone: Arc<RwLock<Option<Uuid>>>, // 保留以备将来使用 (例如 Ping 中携带 client_id)
+        _app_handle: AppHandle, // 当前未使用，加下划线表示
+        ws_send_channel_clone: Arc<TokioMutex<Option<SplitSink<ClientWsStream, TungsteniteMessage>>>>,
+        last_pong_received_at_clone: Arc<RwLock<Option<DateTime<Utc>>>>,
+        is_connected_status_clone: Arc<RwLock<bool>>,
+        _cloud_assigned_client_id_clone: Arc<RwLock<Option<Uuid>>>, // 参数保留，但当前未使用，加下划线
     ) {
-        // **日志标识符已更改**
-        info!("[SatControlCenter] (心跳任务) 启动。");
-        // 创建一个定时器，每隔 HEARTBEAT_INTERVAL_SECONDS 秒触发一次
-        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
-            loop {
-            interval.tick().await; // 等待下一个心跳间隔
+        info!("[SatControlCenter] (心跳任务) 心跳监控已启动，间隔 {} 秒，Pong超时 {} 秒。", HEARTBEAT_INTERVAL_SECONDS, PONG_TIMEOUT_SECONDS);
+        let heartbeat_interval = Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS);
+        let pong_timeout = Duration::from_secs(PONG_TIMEOUT_SECONDS);
 
-            // 1. 检查连接状态，如果已断开则退出心跳循环
-                if !*is_connected_status_clone.read().await {
-                // **日志标识符已更改**
-                info!("[SatControlCenter] (心跳任务) 检测到连接已断开，退出心跳循环。");
-                    break; // 退出循环
-                }
+        loop {
+            // 等待心跳间隔或任务被取消
+            if tokio::time::timeout(heartbeat_interval, tokio::signal::ctrl_c()) // 使用 ctrl_c 作为可取消的 future
+                .await.is_ok() { // 如果 ctrl_c 信号被接收 (或超时，但这里主要关心取消点)
+                info!("[SatControlCenter] (心跳任务) 收到取消信号或超时，正在终止心跳任务...");
+                break;
+            }
 
-            // 2. 检查 Pong 响应是否超时
-            let now = Utc::now();
-                let last_pong_time = *last_pong_received_at_clone.read().await;
-                if let Some(last_pong) = last_pong_time {
-                // 如果当前时间距离上次收到 Pong 的时间超过了 心跳间隔 + Pong超时容忍时间
-                // 使用 chrono::Duration 进行时间差比较
-                if now.signed_duration_since(last_pong) > chrono::Duration::seconds((HEARTBEAT_INTERVAL_SECONDS + PONG_TIMEOUT_SECONDS) as i64) {
-                    // **日志标识符已更改**
-                    warn!(
-                        "[SatControlCenter] (心跳任务) Pong 响应超时 (最后一次收到 Pong 是在: {:?}, 当前时间: {:?})。将触发断开连接处理。",
-                        last_pong, now
-                    );
-                    // 发送连接错误事件到前端，告知用户连接可能已断开
-                    // **确保 WsConnectionStatusEvent 定义正确**
-                    let event_payload = WsConnectionStatusEvent { 
-                        connected: false,
-                        error_message: Some("心跳响应超时，连接可能已断开".to_string()),
-                        client_id: None, // 断开时清除 ID
-                    };
-                    // **确保 WS_CONNECTION_STATUS_EVENT 常量定义正确**
-                    if let Err(e) = app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-                        // **日志标识符已更改**
-                        error!("[SatControlCenter] (心跳任务) 发送 Pong 超时断开事件失败: {}", e);
+            // 检查连接状态
+            if !*is_connected_status_clone.read().await {
+                info!("[SatControlCenter] (心跳任务) 检测到连接已断开，正在终止心跳任务...");
+                break;
+            }
+
+            // 检查 Pong 超时
+            let last_pong_opt = *last_pong_received_at_clone.read().await;
+            if let Some(last_pong_time) = last_pong_opt {
+                // Convert std::time::Duration to chrono::Duration for comparison
+                let timeout_duration_chrono = match chrono::Duration::from_std(pong_timeout + heartbeat_interval) {
+                    Ok(cd) => cd,
+                    Err(e) => {
+                        error!("[SatControlCenter] (心跳任务) 无法将 std::time::Duration 转换为 chrono::Duration: {:?}", e);
+                        // Fallback or break, here we break to be safe
+                        break;
                     }
-                    // 将主连接状态设置为 false，这将使得主连接任务 (在 connect 中) 检测到并退出清理
-                    *is_connected_status_clone.write().await = false;
-                    // **日志标识符已更改**
-                    info!("[SatControlCenter] (心跳任务) 因 Pong 超时，已将连接状态设为 false，退出心跳循环。");
-                    break; // 退出心跳循环
-            }
-        } else {
-                // 如果从未收到过 Pong (last_pong_received_at 仍为 None)，但连接已建立一段时间，也可能表示有问题
-                // 但首次 Ping 可能还未收到响应，所以这里暂时不处理 None 的情况，依赖后续的超时
-                // **日志标识符已更改**
-                debug!("[SatControlCenter] (心跳任务) 尚未收到任何 Pong 响应。");
-            }
-            
-            // 3. 发送 Ping 消息
-            // 构建 PingPayload (通常为空结构体)
-            let ping_payload = PingPayload {}; 
-            // 使用 WsMessage 构造器创建消息
-            match WsMessage::new(PING_MESSAGE_TYPE.to_string(), &ping_payload) {
-                Ok(ws_message) => {
-                    // **日志标识符已更改**
-                    info!(
-                        "[SatControlCenter] (心跳任务) 准备发送 Ping 消息 (ID: {}, Type: {}) 到云端...",
-                        ws_message.message_id, ws_message.message_type
+                };
+                if Utc::now().signed_duration_since(last_pong_time) > timeout_duration_chrono {
+                    warn!(
+                        "[SatControlCenter] (心跳任务) Pong 响应超时 (超过 {} 秒未收到 Pong)。可能连接已死。",
+                        (pong_timeout + heartbeat_interval).as_secs()
                     );
-                    // 获取发送通道的锁
-                    if let Some(sender) = ws_send_channel_clone.lock().await.as_mut() {
-                         // 将 WsMessage 序列化为 JSON 字符串
-                         match serde_json::to_string(&ws_message) { 
-                             Ok(msg_json) => {
-                                // 使用 Tokio-Tungstenite 的 Sink 发送 Text 消息
-                                match sender.send(TungsteniteMessage::Text(msg_json)).await { 
-                                Ok(_) => {
-                                        // **日志标识符已更改**
-                                        info!("[SatControlCenter] (心跳任务) Ping 消息已成功发送。");
-                                        // 发送成功后，可以稍微提前更新 last_pong_received_at 的"预期"时间，
-                                        // 或者依赖严格的超时检查。
-                                        // 为简单起见，此处不更新，等待 Pong 回复来实际更新。
+                    // 注意：这里仅记录警告。实际的连接断开和清理应由主连接任务的 `on_close` 或 `on_error` 处理，
+                    // 或者由更高级的重连策略管理。心跳任务本身不直接关闭连接。
+                    // 如果需要主动断开，可以考虑发送一个信号给主连接任务或调用 disconnect。
+                }
+            } else {
+                // 如果从未收到过 Pong (例如连接刚建立或有问题)，也记录一下
+                warn!("[SatControlCenter] (心跳任务) 从未收到过 Pong 或 Pong 时间戳已被重置。");
+            }
+
+            // 发送 Ping 消息
+            debug!("[SatControlCenter] (心跳任务) 发送 Ping 消息...");
+            let ping_payload = PingPayload {}; // Empty struct for PingPayload
+            match serde_json::to_string(&ping_payload) { // Serialize PingPayload
+                Ok(json_payload) => {
+                    // Manually construct WsMessage if not using WsMessage::new helper which handles id and timestamp
+                    let ws_message = WsMessage {
+                        message_id: Uuid::new_v4().to_string(), // Add message_id
+                        timestamp: Utc::now().timestamp_millis(), // Add timestamp
+                        message_type: PING_MESSAGE_TYPE.to_string(),
+                        payload: json_payload,
+                    };
+                    let mut sender_guard = ws_send_channel_clone.lock().await;
+                    if let Some(ref mut sender) = *sender_guard {
+                        match serde_json::to_string(&ws_message) { // Serialize WsMessage to JSON string
+                            Ok(msg_json_str) => {
+                                if let Err(e) = sender.send(TungsteniteMessage::Text(msg_json_str)).await {
+                                    error!("[SatControlCenter] (心跳任务) 发送 Ping 消息失败: {:?}", e);
+                                    // 发送失败可能意味着连接已断开，心跳循环将在下次检查 is_connected 时终止
+                                } else {
+                                    debug!("[SatControlCenter] (心跳任务) Ping 消息已发送。");
                                 }
-            Err(e) => {
-                                        // **日志标识符已更改**
-                                        error!("[SatControlCenter] (心跳任务) 发送 Ping 消息失败: {}", e);
-                                        // 发送失败通常意味着底层连接已断开
-                                        // 立即将连接状态设为 false，让主任务退出清理
-                                        *is_connected_status_clone.write().await = false;
-                                        // **日志标识符已更改**
-                                        info!("[SatControlCenter] (心跳任务) 因 Ping 发送失败，已将连接状态设为 false，退出心跳循环。");
-                                        break; // 退出循环
-                                    }
-                                }
-                                }
-                                Err(e) => {
-                                // **日志标识符已更改**
-                                error!("[SatControlCenter] (心跳任务) 序列化 Ping WsMessage 失败: {}", e);
-                                // 序列化失败是内部错误，不直接退出，但需要记录
+                            },
+                            Err(e) => {
+                                error!("[SatControlCenter] (心跳任务) 序列化 WsMessage (Ping) 失败: {:?}", e);
                             }
                         }
                     } else {
-                        // 如果发送通道不可用 (通常是 None)，说明连接已断开
-                        // **日志标识符已更改**
-                        warn!("[SatControlCenter] (心跳任务) WebSocket 发送通道不可用，无法发送 Ping。退出心跳循环。");
-                        break; // 退出循环
+                        warn!("[SatControlCenter] (心跳任务) 尝试发送 Ping 但 WebSocket 发送通道不存在 (可能已断开)。");
+                        // 心跳循环将在下次检查 is_connected 时终止
                     }
                 }
                 Err(e) => {
-                    // **日志标识符已更改**
-                    error!("[SatControlCenter] (心跳任务) 创建 Ping WsMessage 失败: {}", e);
-                    // 创建消息失败是内部错误，记录但不退出循环
+                    error!("[SatControlCenter] (心跳任务) 序列化 PingPayload 失败: {:?}", e);
                 }
             }
         }
-        // **日志标识符已更改**
-        info!("[SatControlCenter] (心跳任务) 已结束。");
+        info!("[SatControlCenter] (心跳任务) 心跳监控已停止。");
     }
 
-    /// 请求断开当前的 WebSocket 连接。
+    /// 主动断开当前的 WebSocket 连接。
     ///
-    /// 这会设置内部状态以指示断开，并通知正在运行的连接任务退出。
+    /// 此方法会尝试优雅地关闭 WebSocket 连接，并中止相关的处理任务 (连接任务和心跳任务)。
     ///
     /// # 返回
-    /// * `Result<(), String>`: 如果请求处理成功，则返回 `Ok(())`。
+    /// * `Result<(), String>`: 如果操作成功启动，则返回 `Ok(())`。
+    ///   如果发送通道不存在或关闭连接时发生错误，则返回 `Err(String)`。
     pub async fn disconnect(&self) -> Result<(), String> {
-        // **日志标识符已更改**
-        info!("[SatControlCenter] WebSocketClientService::disconnect 被调用。");
-        // 获取连接状态的写锁
-        let mut is_connected_guard = self.is_connected_status.write().await;
-        // 检查当前是否处于连接状态
-        if *is_connected_guard {
-            // **日志标识符已更改**
-            info!("[SatControlCenter] 当前处于连接状态，准备断开...");
-            // 设置状态为 false，这将作为信号被 connect 中的主循环检测到
-            *is_connected_guard = false; 
-            // 显式释放锁，以便其他任务可以继续（如下面的发送 Close 帧）
-            drop(is_connected_guard); 
+        info!("[SatControlCenter] WebSocketClientService::disconnect 调用。");
 
-            // （可选但推荐）尝试向服务器发送一个 Close 帧，进行优雅关闭
-            let mut sender_guard = self.ws_send_channel.lock().await;
-            if let Some(sender) = sender_guard.as_mut() {
-                // **日志标识符已更改**
-                info!("[SatControlCenter] 尝试向服务器发送 Close 帧...");
-                // 使用 SinkExt 的 close() 方法来发送 Close 帧
-                match sender.close().await {
-                   // **日志标识符已更改**
-                   Ok(_) => info!("[SatControlCenter] Close 帧已发送或请求已发出。"),
-                   // **日志标识符已更改**
-                   Err(e) => warn!("[SatControlCenter] 发送 Close 帧失败（可能连接已断开）: {}", e),
-                }
+        // 标记不再连接，这将有助于心跳任务等自行终止
+        *self.is_connected_status.write().await = false;
+
+        // 停止并清理心跳任务句柄
+        let mut hb_task_guard = self.heartbeat_task_handle.lock().await;
+        if let Some(hb_handle) = hb_task_guard.take() {
+            info!("[SatControlCenter] 正在中止心跳任务...");
+            hb_handle.abort();
+            match hb_handle.await {
+                Ok(_) => info!("[SatControlCenter] 心跳任务已成功中止或完成。"),
+                Err(e) if e.is_cancelled() => info!("[SatControlCenter] 心跳任务已被取消。"),
+                Err(e) => warn!("[SatControlCenter] 等待心跳任务结束时发生错误: {:?}", e),
             }
-            // 释放发送通道的锁
-            drop(sender_guard);
-
-            // (可选) 也可以立即中止连接任务句柄，但这可能不如让任务自己检测到状态变化后退出优雅。
-            // relying on the is_connected flag is generally preferred for graceful shutdown.
-             let mut task_guard = self.connection_task_handle.lock().await;
-             if let Some(handle) = task_guard.as_ref() {
-                 // **日志标识符已更改**
-                 info!("[SatControlCenter] (disconnect) 请求中止连接任务...");
-                 handle.abort(); // 请求任务取消
-             }
-             // 不在此处移除句柄 (*task_guard = None;)，让任务自己在退出时清理
-             drop(task_guard);
-
-
-            // 发送断开事件到前端，提供即时反馈
-            // 注意：连接任务的清理阶段也会发送最终状态事件，这里发送是为了更快响应用户操作
-            // **确保 WsConnectionStatusEvent 定义正确**
-            let event_payload = WsConnectionStatusEvent {
-                connected: false,
-                error_message: Some("客户端主动断开连接".to_string()),
-                client_id: None, // 断开时 client_id 无意义
-            };
-            // **确保 WS_CONNECTION_STATUS_EVENT 常量定义正确**
-            if let Err(e) = self.app_handle.emit_to("main", WS_CONNECTION_STATUS_EVENT, &event_payload) {
-                // **日志标识符已更改**
-                error!(
-                    "[SatControlCenter] 发送 \"主动断开\" 事件到前端失败: {}",
-                    e
-                );
-        } else {
-                // **日志标识符已更改**
-                info!("[SatControlCenter] 已向前端发送主动断开事件。");
-            }
-             Ok(()) // 断开请求处理成功
-        } else {
-             // 如果当前未连接，无需执行断开操作
-             drop(is_connected_guard); // 释放锁
-             // **日志标识符已更改**
-             info!("[SatControlCenter] 当前未连接，无需执行断开操作。");
-        Ok(())
         }
+        drop(hb_task_guard);
+
+        // 尝试优雅关闭 WebSocket 发送端
+        let mut sender_guard = self.ws_send_channel.lock().await;
+        if let Some(ref mut sender) = *sender_guard {
+            info!("[SatControlCenter] 正在尝试关闭 WebSocket 发送通道...");
+            if let Err(e) = sender.close().await {
+                warn!("[SatControlCenter] 关闭 WebSocket 发送通道时发生错误: {:?}", e);
+                // 即使关闭失败，也继续清理
+            } else {
+                info!("[SatControlCenter] WebSocket 发送通道已成功请求关闭。");
+            }
+        }
+        *sender_guard = None; // 清理发送通道句柄
+        drop(sender_guard);
+
+        // 停止并清理主连接任务句柄
+        let mut conn_task_guard = self.connection_task_handle.lock().await;
+        if let Some(conn_handle) = conn_task_guard.take() {
+            info!("[SatControlCenter] 正在中止主连接任务...");
+            conn_handle.abort(); // 请求取消主连接任务
+            match conn_handle.await {
+                Ok(_) => info!("[SatControlCenter] 主连接任务已成功中止或完成。"),
+                Err(e) if e.is_cancelled() => info!("[SatControlCenter] 主连接任务已被取消。"),
+                Err(e) => warn!("[SatControlCenter] 等待主连接任务结束时发生错误: {:?}", e),
+            }
+        }
+        drop(conn_task_guard);
+        
+        // 清理其他状态
+        *self.cloud_assigned_client_id.write().await = None;
+        *self.last_pong_received_at.write().await = None;
+
+        // 发送断开连接事件到前端 (如果之前是连接状态)
+        // 注意：主连接任务的结束逻辑中通常也会发送此事件，这里可能重复，但为了确保，可以发送。
+        // 或者依赖主连接任务的清理逻辑。
+        info!("[SatControlCenter] 发送显式断开连接状态事件。");
+        let event_payload = WsConnectionStatusEvent {
+            connected: false,
+            error_message: Some("用户请求断开连接".to_string()),
+            client_id: None,
+        };
+        if let Err(e) = self.app_handle.emit(WS_CONNECTION_STATUS_EVENT, &event_payload) {
+            error!(
+                "[SatControlCenter] 发送显式断开事件 ({}) 失败: {}",
+                WS_CONNECTION_STATUS_EVENT, e
+            );
+        }
+
+        info!("[SatControlCenter] WebSocketClientService::disconnect 完成。");
+        Ok(())
     }
 
     /// 检查当前 WebSocket 是否已连接。
     ///
     /// # 返回
-    /// * `bool`: 如果连接状态标志为 `true`，则返回 `true`；否则返回 `false`。
+    /// * `bool`: 如果已连接则为 `true`，否则为 `false`。
     pub async fn is_connected(&self) -> bool {
-        // 读取连接状态标志 (使用读锁)
         *self.is_connected_status.read().await
     }
 
-    /// 向 WebSocket 服务器发送一个 `WsMessage`。
-    ///
-    /// # 参数
-    /// * `message` - 要发送的 `WsMessage` 实例。
+    /// 获取当前云端分配的客户端 ID (如果已连接并注册)。
     ///
     /// # 返回
-    /// * `Result<(), String>`: 如果消息成功序列化并放入发送队列，则返回 `Ok(())`。
-    ///   如果当前未连接、序列化失败或发送时发生错误，则返回包含错误描述的 `Err(String)`。
+    /// * `Option<Uuid>`: 如果已分配，则返回客户端 ID，否则返回 `None`。
+    pub async fn get_cloud_assigned_client_id(&self) -> Option<Uuid> {
+        *self.cloud_assigned_client_id.read().await
+    }
+
+    /// 发送一个 `WsMessage` 到已连接的 WebSocket 服务器。
+    ///
+    /// # 参数
+    /// * `message`: 要发送的 `WsMessage` 实例。
+    ///
+    /// # 返回
+    /// * `Result<(), String>`: 如果消息成功放入发送队列，则返回 `Ok(())`。
+    ///   如果未连接或发送失败，则返回 `Err(String)`。
     pub async fn send_ws_message(&self, message: WsMessage) -> Result<(), String> {
-        // **日志标识符已更改**
-        info!(
-            "[SatControlCenter] WebSocketClientService::send_ws_message 调用，准备发送类型: {}, ID: {}", 
-            message.message_type, message.message_id
-        );
-        // 检查当前是否已连接
         if !self.is_connected().await {
-            let err_msg = "无法发送消息：WebSocket 未连接。".to_string();
-            // **日志标识符已更改**
-            error!("[SatControlCenter] {}", err_msg);
+            let err_msg = "[SatControlCenter] 发送 WebSocket 消息失败：未连接到服务器。".to_string();
+            warn!("{}", err_msg);
             return Err(err_msg);
         }
 
-        // 获取发送通道的互斥锁
         let mut sender_guard = self.ws_send_channel.lock().await;
-        // 检查发送通道是否存在 (是否为 Some)
-        if let Some(sender) = sender_guard.as_mut() {
-            // 将 WsMessage 序列化为 JSON 字符串
-            match serde_json::to_string(&message) {
-                Ok(msg_json) => {
-                    // 使用 Sink 发送 Text 消息
-                    match sender.send(TungsteniteMessage::Text(msg_json)).await {
-                Ok(_) => {
-                            // **日志标识符已更改**
-                            info!("[SatControlCenter] 消息 (类型: {}, ID: {}) 已成功发送。", message.message_type, message.message_id);
-                            Ok(()) // 发送成功
-                }
-                Err(e) => {
-                            // 发送失败，可能连接已在此过程中断开
-                            let err_msg = format!("发送 WebSocket 消息时发生错误: {}", e);
-                            // **日志标识符已更改**
-                            error!("[SatControlCenter] {}", err_msg);
-                            // 标记连接为断开状态，以便主任务进行清理
-                            *self.is_connected_status.write().await = false;
-                            Err(err_msg) // 返回错误
+        if let Some(ref mut sender) = *sender_guard {
+            let message_type_for_log = message.message_type.clone(); // 用于日志
+            let payload_summary_for_log = truncate_string(&message.payload, 100); // 日志中 Payload 摘要
+            match serde_json::to_string(&message) { // Serialize WsMessage to JSON string
+                Ok(msg_json_str) => {
+                    match sender.send(TungsteniteMessage::Text(msg_json_str)).await {
+                        Ok(_) => {
+                            debug!(
+                                "[SatControlCenter] WebSocket 消息已发送: 类型='{}', Payload摘要='{}'",
+                                message_type_for_log,
+                                payload_summary_for_log
+                            );
+                            Ok(())
+                        }
+                        Err(e) => {
+                            let err_msg = format!(
+                                "[SatControlCenter] 发送 WebSocket 消息 (类型='{}') 失败: {:?}",
+                                message_type_for_log, e
+                            );
+                            error!("{}", err_msg);
+                            Err(err_msg)
                         }
                     }
                 }
                 Err(e) => {
-                    // 序列化失败是内部错误
-                    let err_msg = format!("序列化 WsMessage 失败: {}", e);
-                    // **日志标识符已更改**
-                    error!("[SatControlCenter] {}", err_msg);
-                    Err(err_msg) // 返回错误
+                    let err_msg = format!(
+                        "[SatControlCenter] 序列化 WebSocket 消息 (类型='{}') 失败: {:?}",
+                        message_type_for_log, e
+                    );
+                    error!("{}", err_msg);
+                    Err(err_msg)
                 }
             }
         } else {
-            // 如果发送通道是 None，说明连接已断开
-            let err_msg = "无法发送消息：WebSocket 发送通道不可用 (可能已断开)。".to_string();
-            // **日志标识符已更改**
-            error!("[SatControlCenter] {}", err_msg);
-            // 确保状态反映为断开
-            *self.is_connected_status.write().await = false;
-            Err(err_msg) // 返回错误
+            let err_msg = "[SatControlCenter] 发送 WebSocket 消息失败：发送通道不可用 (可能已断开)。".to_string();
+            warn!("{}", err_msg);
+            Err(err_msg)
         }
     }
 
-     /// 获取当前缓存的任务调试状态。
-     /// 
-     /// # 返回
-     /// * `Option<TaskDebugState>`: 如果本地有缓存的状态，则返回其克隆；否则返回 `None`。
-     pub async fn get_cached_task_state(&self) -> Option<TaskDebugState> {
-        // 使用读锁访问缓存
+    /// 获取本地缓存的最新 `TaskDebugState`。
+    ///
+    /// 此方法是同步的，因为它只是读取 `RwLock` 保护的数据。
+    ///
+    /// # 返回
+    /// * `Option<TaskDebugState>`: 如果缓存中有状态，则返回其克隆，否则返回 `None`。
+    pub async fn get_cached_task_state(&self) -> Option<TaskDebugState> {
         self.local_task_state_cache.read().await.clone()
     }
 }
 
-// 注意：如果 WebSocketClientService::new 需要 app_handle，则不能直接 Default。
-// Tauri 的 State 管理通常在 setup 中创建并 manage，所以 Default 可能不需要。
-// impl Default for WebSocketClientService {
-//     fn default() -> Self {
-//         panic!("WebSocketClientService 不能在没有 AppHandle 的情况下 Default::default() 创建");
-//     }
-// }
+/// 辅助函数，用于截断字符串以便在日志中显示摘要。
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}... (truncated)", &s[..max_len.saturating_sub(20)]) // 留出空间给 ... (truncated)
+    } else {
+        s.to_string()
+    }
+}

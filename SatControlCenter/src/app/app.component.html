@@ -1,53 +1,115 @@
-<div>
-  <h1>SatControlCenter 指挥中心</h1>
+<!-- 
+  SatControlCenter AppComponent 的 HTML 模板文件。
+  这个文件定义了中心端应用的用户界面布局和元素。
+-->
 
-  <hr />
+<!-- 页面主容器 -->
+<div class="container">
+  <!-- 标题区域 -->
+  <h1>中心端 (SatControlCenter)</h1>
 
-  <h2>1. WebSocket 连接</h2>
-  <button (click)="connectToCloud()">连接到云端 (ws://127.0.0.1:8088)</button>
-  <button (click)="triggerReconnect()">手动触发重新连接</button>
-  <p><strong>连接状态:</strong> {{ connectionStatusMessage }}</p>
-
-  <hr />
-
-  <h2>2. 客户端注册 (指挥中心通常不注册自己)</h2>
-  <div>
-    <label for="groupId">组ID (GroupID): </label>
-    <input id="groupId" type="text" [(ngModel)]="groupId" />
+  <!-- 连接状态显示区域 -->
+  <div class="section">
+    <h2>连接状态</h2>
+    <!-- 
+      使用 Angular 的插值绑定显示 connectionStatusMessage 变量的内容。
+      connectionStatusMessage 的值在 AppComponent.ts 中根据 WebSocket 连接状态动态更新。
+    -->
+    <p>{{ connectionStatusMessage }}</p>
+    <!-- 
+      连接按钮，点击时调用 AppComponent.ts 中的 connectToCloud 方法。
+      [disabled] 属性绑定：当 connectionStatusMessage 包含 "已连接" 时，禁用此按钮。
+    -->
+    <button (click)="connectToCloud()" [disabled]="connectionStatusMessage.includes('已连接')">连接到云服务</button>
+    <!-- 
+      这是一个触发重连的示例按钮，假设后端有 trigger_reconnect 命令。
+      实际的重连逻辑通常是自动的，由 ws_client/service.rs 处理。
+    -->
+    <!-- <button (click)="triggerReconnect()">触发重连 (如果实现)</button> -->
   </div>
-  <div>
-    <label for="taskId">任务ID (TaskID): </label>
-    <input id="taskId" type="text" [(ngModel)]="taskId" />
+
+  <!-- 注册状态显示区域 -->
+  <div class="section">
+    <h2>注册状态</h2>
+    <!-- 显示 registrationStatusMessage 变量的内容，反映客户端向云端任务组的注册情况 -->
+    <p>{{ registrationStatusMessage }}</p>
+    
+    <!-- 组ID输入区域 -->
+    <div>
+      <label for="groupId">组ID (GroupID): </label>
+      <!-- 
+        输入框，使用 Angular 的双向数据绑定 [(ngModel)] 将输入值与 AppComponent.ts 中的 groupId 属性同步。
+      -->
+      <input type="text" id="groupId" [(ngModel)]="groupId">
+    </div>
+    
+    <!-- 任务ID输入区域 -->
+    <div>
+      <label for="taskId">任务ID (TaskID): </label>
+      <!-- 
+        输入框，使用 Angular 的双向数据绑定 [(ngModel)] 将输入值与 AppComponent.ts 中的 taskId 属性同步。
+      -->
+      <input type="text" id="taskId" [(ngModel)]="taskId">
+    </div>
+    <!-- 
+      注册按钮，点击时调用 AppComponent.ts 中的 registerClient 方法。
+      [disabled] 属性绑定：
+        - 当 connectionStatusMessage 不包含 "已连接" (即未连接到云服务) 时，禁用按钮。
+        - 或者当 registrationStatusMessage 包含 "注册成功" 时，也禁用按钮 (防止重复注册)。
+    -->
+    <button 
+      (click)="registerClient()" 
+      [disabled]="!connectionStatusMessage.includes('已连接') || registrationStatusMessage.includes('注册成功')">
+      注册到任务组
+    </button>
   </div>
-  <button (click)="registerClient()" [disabled]="!groupId || !taskId">(示例) 发送注册命令 (通常由现场端执行)</button>
-  <p><strong>注册状态 (命令反馈/事件):</strong> {{ registrationStatusMessage }}</p>
 
-  <hr />
-
-  <h2>3. 伙伴客户端状态</h2>
-  <p><strong>伙伴状态 (通过事件更新):</strong> {{ partnerStatusMessage }}</p>
-
-  <hr />
-
-  <h2>4. 任务调试状态 (TaskDebugState)</h2>
-  <p><strong>当前任务状态 (JSON, 通过事件更新):</strong></p>
-  <pre>{{ taskStateString }}</pre>
-
-  <hr />
-
-  <h2>Echo 测试</h2>
-  <div>
-    <label for="echoInput">要发送的内容: </label>
-    <input id="echoInput" type="text" [(ngModel)]="echoInput" />
-    <button (click)="sendEcho()" [disabled]="!echoInput">发送 Echo</button>
+  <!-- 伙伴状态显示区域 -->
+  <!-- 
+    使用 Angular 的结构指令 *ngIf 来条件性地显示这部分内容。
+    仅当 AppComponent.ts 中的 partnerInfo 对象不为 null (即已从服务接收到伙伴信息) 时才显示。
+  -->
+  <div *ngIf="partnerInfo" class="section partner-info">
+    <h2>伙伴状态 (现场端)</h2>
+    <!-- 显示伙伴的角色 -->
+    <p>角色: {{ partnerInfo.partner_role }}</p>
+    <!-- 
+      显示伙伴的在线状态。
+      使用内联条件和 CSS 类来给在线/离线状态不同的颜色。
+    -->
+    <p>状态: 
+      <span [ngClass]="{'online': partnerInfo.is_online, 'offline': !partnerInfo.is_online}">
+        {{ partnerInfo.is_online ? '在线' : '离线' }}
+      </span>
+    </p>
+    <!-- 显示伙伴的客户端ID，如果存在 -->
+    <p *ngIf="partnerInfo.partner_client_id">伙伴客户端ID: {{ partnerInfo.partner_client_id }}</p>
+    <!-- 显示伙伴所在的组ID，如果存在 -->
+    <p *ngIf="partnerInfo.group_id">所在组ID: {{ partnerInfo.group_id }}</p>
   </div>
-  <p><strong>Echo 回复:</strong> {{ echoResponseMessage }}</p>
 
-  <hr />
+  <!-- Echo 功能区域 -->
+  <div class="section">
+    <h2>Echo 测试</h2>
+    <!-- Echo 输入框，双向绑定到 AppComponent.ts 中的 echoInput 属性 -->
+    <input type="text" [(ngModel)]="echoInput" placeholder="输入要发送的Echo消息">
+    <!-- 
+      发送 Echo 按钮，点击时调用 AppComponent.ts 中的 sendEcho 方法。
+      [disabled] 属性绑定：当未连接到云服务时禁用按钮。
+    -->
+    <button (click)="sendEcho()" [disabled]="!connectionStatusMessage.includes('已连接')">发送 Echo</button>
+    <!-- 显示从云端收到的 Echo 回复消息 -->
+    <p>{{ echoResponseMessage }}</p>
+  </div>
 
-  <h2>5. 业务操作 (占位符)</h2>
-  <p><em>此处将添加用于触发具体业务操作（如任务控制、参数下发等）的按钮和表单。</em></p>
-  <button disabled>(示例) 下发控制指令</button>
-  <button disabled>(示例) 查询现场状态</button>
+  <!-- 任务状态显示区域 -->
+  <div class="section task-state-section">
+    <h2>当前任务状态 (TaskDebugState)</h2>
+    <!-- 
+      使用 <pre> 标签来保持 JSON 字符串的格式。
+      显示 AppComponent.ts 中的 taskStateString 属性，该属性通常包含格式化后的 TaskDebugState JSON。
+    -->
+    <pre>{{ taskStateString }}</pre>
+  </div>
 
 </div>

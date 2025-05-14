@@ -1,60 +1,41 @@
-// SatControlCenter/src-tauri/src/state.rs
+// SatOnSiteMobile/src-tauri/src/state.rs
 
-//! `SatControlCenter` (卫星控制中心) 应用共享状态管理模块。
+//! `SatOnSiteMobile` (现场端移动应用) 的共享状态管理模块。
 //!
-//! 本模块的核心职责是定义、初始化和管理在 `SatControlCenter` 应用整个生命周期内
-//! 需要被多个模块或 Tauri 命令共享访问的状态数据。
+//! 本模块用于定义和管理那些需要在应用不同部分（尤其是在 Tauri 命令处理函数之间）
+//! 共享的应用级别状态。
 //!
-//! # Tauri 状态管理机制
-//! 根据项目规则 (8.1. Rust (Tauri Backend State Management - Tauri后端状态管理))，
-//! `SatControlCenter` 将利用 Tauri 提供的状态管理功能。具体而言：
-//! - **状态结构体定义**: 需要共享的状态数据将被组织到特定的 Rust 结构体中。
-//!   例如，可能会有一个 `AppState` (应用状态) 结构体，其中包含如当前用户信息、
-//!   应用级设置、或其他跨多个功能模块共享的数据片段。
-//! - **托管状态 (`tauri::State<T>`)**: 定义好的状态结构体实例，将在应用启动时
-//!   (通常在 `main.rs` 的 `setup` 钩子中) 被创建，并通过 `app.manage(your_state_instance)`
-//!   方法注册为 Tauri 的托管状态。Tauri 会负责该状态实例的生命周期管理。
-//! - **状态访问**: 在 Tauri 命令 (`#[tauri::command]`) 的函数签名中，可以通过类型系统
-//!   声明一个 `tauri::State<'_, YourStateType>` 类型的参数，从而安全地获取对托管状态的引用。
-//!   例如：`state: tauri::State<'_, Arc<AppState>>`。
-//! - **并发安全**: 对于需要在多个并发执行的 Tauri 命令之间共享并且可能被修改的状态，
-//!   必须确保其线程安全。项目规则推荐使用 `Arc<Mutex<T>>` (原子引用计数的互斥锁)
-//!   或 `Arc<RwLock<T>>` (原子引用计数的读写锁) 来包裹实际的状态数据 `T`。
-//!   然后，这个 `Arc<Mutex<T>>` 或 `Arc<RwLock<T>>` 实例本身被放入 `tauri::State` 中进行管理。
-//!   例如: `tauri::State<'_, Arc<RwLock<AppState>>>`。
-//!   这样可以确保在并发访问和修改共享状态时不会发生数据竞争。
+//! Tauri 提供了内置的状态管理机制，允许将任何实现了 `Send + Sync + 'static` 的类型
+//! 通过 `AppHandle::manage()` 方法注册为托管状态，之后可以在命令中通过 `tauri::State<T>` 进行访问。
 //!
-//! # 未来规划
-//! 随着应用的开发，本模块将逐步定义和实现以下可能的状态：
-//! - `SharedConfigState`: 存储从 `config.rs` 加载的应用配置 (`AppConfig`) 的一个共享副本，
-//!   以便在各个命令中无需重复加载配置即可访问配置参数。
-//! - `WebSocketConnectionState`: (如果 `WebSocketClientService` 的状态需要更细粒度地被其他模块共享)
-//!   可能包含当前与云端服务的连接状态、客户端ID等信息的一个可被安全读取的副本。
-//! - 其他任何需要在不同 Tauri 命令或服务间共享的、应用范围的数据。
+//! **主要应用场景**: 
+//! - `WebSocketClientService`: 已经在 `main.rs` 的 `setup` 钩子中通过 `app.manage()` 注册。
+//! - 其他需要跨命令共享的服务或数据结构，例如设备连接状态管理器、任务执行上下文等。
+//!
+//! 如果某些状态不适合或不需要通过 Tauri 的托管状态机制管理（例如，模块内部的私有状态），
+//! 也可以在此模块中定义，并提供相应的访问和修改接口。
+//!
+//! ```rust
+//! // 示例：定义一个简单的应用状态结构体
+//! #[derive(Debug, Default)] // Default 可以方便地创建初始实例
+//! pub struct AppMetrics {
+//!     pub messages_sent: std::sync::atomic::AtomicUsize,
+//!     pub messages_received: std::sync::atomic::AtomicUsize,
+//! }
+//!
+//! // 在 main.rs 或 lib.rs 的 setup 中:
+//! // app.manage(Arc::new(tokio::sync::Mutex::new(AppMetrics::default())));
+//!
+//! // 在命令中访问:
+//! // async fn some_command(metrics: tauri::State<'_, Arc<tokio::sync::Mutex<AppMetrics>>>) -> Result<(), String> {
+//! //     let mut metrics_guard = metrics.inner().lock().await;
+//! //     metrics_guard.messages_sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+//! //     Ok(())
+//! // }
+//! ```
 
-// 模块主体当前为空。
-// 后续开发阶段：将根据应用具体需求，在此处定义相关的状态结构体，并在 `main.rs` 中
-// 进行实例化和注册为 Tauri 托管状态。例如：
-//
-// ```rust,ignore
-// use std::sync::{Arc, Mutex};
-// use serde::Serialize;
-//
-// // 示例：一个简单的应用计数器状态
-// #[derive(Default, Debug, Serialize, Clone)] // Serialize 和 Clone 视具体需求添加
-// pub struct CounterState {
-//     value: i32,
-// }
-//
-// // 假设在 main.rs 的 setup 钩子中:
-// // let initial_counter_state = Arc::new(Mutex::new(CounterState::default()));
-// // app.manage(initial_counter_state);
-//
-// // 在 Tauri 命令中访问:
-// // #[tauri::command]
-// // async fn increment_counter(state: tauri::State<'_, Arc<Mutex<CounterState>>>) -> Result<i32, String> {
-// //     let mut counter = state.lock().map_err(|e| e.to_string())?;
-// //     counter.value += 1;
-// //     Ok(counter.value)
-// // }
-// ``` 
+// 初始占位：此模块当前主要用于概念性说明。
+// `WebSocketClientService` 实例已在 `main.rs` 中被 Tauri 管理。
+// 后续如果需要其他全局共享状态，可以在此定义，并考虑是否也通过 Tauri 的状态管理机制进行注入。
+
+// 暂时为空，后续会定义和管理 Tauri 应用状态。 
