@@ -24,6 +24,7 @@ pub mod task_info;          // 与调试任务详细信息（状态、步骤等�
 pub mod ws_payloads;        // WebSocket 通信中使用的各种消息负载结构体
 pub mod enums;              // 项目中通用的枚举类型定义
 pub mod task_models;        // 新增：与调试任务具体状态和业务交互相关的模型 (P3.3.1)
+pub mod templates;          // 新增 templates 模块声明
 
 /// 一个简单的示例函数，用于演示 crate 的基本功能和测试。
 /// 在实际的 `common_models` 库中，此类通用工具函数可能较少，主要侧重于数据结构定义。
@@ -100,6 +101,8 @@ mod lib_tests { // 重命名测试模块以避免与子模块中的 `tests` 冲�
             group_id: "test_group".to_string(),
             role: ClientRole::ControlCenter, // ClientRole 应通过 pub use enums::ClientRole; 可用
             task_id: "test_task".to_string(),
+            client_software_version: None, // 添加 None 值
+            client_display_name: None,   // 添加 None 值
         };
         let payload_str = serde_json::to_string(&example_payload_struct).unwrap();
 

@@ -2,9 +2,9 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "sat-control-center",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.satplatform.satcontrolcenter",
   "build": {
-    "frontendDist": "./dist",
+    "frontendDist": "../dist/sat-control-center/browser",
     "devUrl": "http://localhost:14300",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
