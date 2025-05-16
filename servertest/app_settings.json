@@ -1,0 +1,8 @@
+{
+  "websocket": {
+    "host": "127.0.0.1",
+    "port": 8088,
+    "heartbeat_check_interval_seconds": 15,
+    "client_timeout_seconds": 60
+  }
+}

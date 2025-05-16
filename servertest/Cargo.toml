@@ -1,0 +1,32 @@
+[package]
+name = "servertest"
+version = "0.1.0"
+edition = "2021"
+description = "独立的SatCloudService后端服务器"
+authors = ["you"]
+rust-version = "1.77.2"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tracing = "0.1"
+common_models = { path = "../common_models" }
+rust_websocket_utils = { path = "../rust_websocket_utils" }
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.10"
+uuid = { version = "1.6.1", features = ["v4", "serde"] }
+thiserror = "1.0.61"
+anyhow = "1.0.86"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3.30"
+tokio-tungstenite = "0.23.1"
+dashmap = "5.5.3"
+
+# WebSocket 和网络相关
+axum = { version = "0.7.4", features = ["ws", "macros"] }
+tower-http = { version = "0.5.0", features = ["fs", "trace", "cors"] }
+tower = { version = "0.4" }
+
+# API 相关 (如果需要的话)
+# ...add more API-related dependencies if needed

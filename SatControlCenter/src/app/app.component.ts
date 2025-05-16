@@ -216,7 +216,7 @@ export class AppComponent implements OnInit, OnDestroy {
     try {
       // 调用 Tauri 后端命令 connect_to_cloud，不传递 URL 则使用默认配置
       console.log('[中心端 AppComponent] 调用 Tauri 命令: connect_to_cloud');
-      const connectionUrl = 'ws://127.0.0.1:8088'; 
+      const connectionUrl = 'ws://66.103.223.51:8088'; 
       console.log(`[中心端 AppComponent] 尝试连接到 WebSocket 服务地址: ${connectionUrl}`);
       await invoke('connect_to_cloud', { url: connectionUrl })
         .then(() => {
