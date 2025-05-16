@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/SatCloudService/src-tauri/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/SatControlCenter/src-tauri/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/SatOnSiteMobile/src-tauri/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/common_models/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rust_websocket_utils/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/servertest/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/SatCloudService/src-tauri/target" />
+      <excludeFolder url="file://$MODULE_DIR$/SatControlCenter/src-tauri/target" />
+      <excludeFolder url="file://$MODULE_DIR$/SatOnSiteMobile/src-tauri/target" />
+      <excludeFolder url="file://$MODULE_DIR$/common_models/target" />
+      <excludeFolder url="file://$MODULE_DIR$/rust_websocket_utils/target" />
+      <excludeFolder url="file://$MODULE_DIR$/servertest/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

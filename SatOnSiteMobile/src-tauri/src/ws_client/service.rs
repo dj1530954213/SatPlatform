@@ -223,8 +223,10 @@ impl WebSocketClientService {
 
                     // --- 消息接收循环 ---
                     loop {
+                        //Tokio 异步运行时库提供的一个非常强大的宏。它的核心功能是并发地等待多个不同的异步操作，并在其中任何一个操作完成时立即执行相应的代码块，而不会等待其他未完成的操作。
+                        //可以把它想象成一个岔路口，程序同时关注几条路上的信号。哪条路上的信号先来了（即哪个异步操作先完成了），程序就走哪条路，处理那个信号。其余信号不处理。
                         tokio::select! {
-                            // 接收消息
+                            // 接收消息，当receive_message异步程序的future执行完成后将执行=>内的代码
                             maybe_msg_result = transport::receive_message(&mut client_connection.ws_receiver) => {
                                 match maybe_msg_result {
                                     Some(Ok(ws_msg)) => {
@@ -905,6 +907,8 @@ impl WebSocketClientService {
         // 克隆 Option<TaskDebugState>。如果 Option 是 Some，则内部的 TaskDebugState 也会被克隆
         // (因为 TaskDebugState 派生了 Clone trait)。
         // 如果 Option 是 None，则克隆结果仍然是 None。
+
+         //这里能返回为option是因为TaskDebugState 派生了 Clone trait。在克隆的时候会自动解引用返回一个option
         cache_guard.clone()
     }
 
